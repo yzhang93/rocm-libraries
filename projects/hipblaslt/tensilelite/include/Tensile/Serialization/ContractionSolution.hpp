@@ -136,6 +136,8 @@ namespace TensileLite
                 iot::mapOptional(io, "adaptiveGemmNTAB", s.adaptiveGemmNTAB);
                 iot::mapRequired(io, "customMainLoopScheduling", s.customMainLoopScheduling);
                 iot::mapOptional(io, "useSubtileImpl", s.useSubtileImpl);
+                iot::mapOptional(io, "PartialRMS",            s.partialRMS);
+                iot::mapOptional(io, "PartialRMSResidualAdd", s.partialRMSResidualAdd);
                 iot::mapRequired(io, "NonTemporalD", s.NonTemporalD);
                 iot::mapRequired(io, "WaveSeparateGlobalReadA", s.WaveSeparateGlobalReadA);
                 iot::mapRequired(io, "WaveSeparateGlobalReadB", s.WaveSeparateGlobalReadB);
@@ -224,6 +226,8 @@ namespace TensileLite
                 // mxScaleFormat is mapped as optional so logic files that omit it
                 // (e.g. non-MX problems) deserialize cleanly with the default 0 = NoSwizzle.
                 iot::mapOptional(io, "mxScaleFormat", s.mxScaleFormat);
+                iot::mapOptional(io, "usePartialRMS", s.usePartialRMS);
+                iot::mapOptional(io, "partialRMSResidualAdd", s.partialRMSResidualAdd);
             }
 
             const static bool flow = false;

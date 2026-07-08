@@ -36,11 +36,10 @@ import re
 def parseDeviceNameToHex(deviceName: Optional[str]) -> Optional[str]:
     """Parse 'Device 75a3' into 75a3 (hex).
     Args:
-        deviceName: Of format 'Device XXXX'
+        deviceName: Of format 'Device XXXX', or a non-device token like 'fallback'.
     Returns:
-        Hex-formatted chip ID string (without "id=" prefix), e.g. "75a3"
-    Raise:
-        SystemExit if format is invalid, enforces library logic at build time.
+        Hex-formatted chip ID string (without "id=" prefix), e.g. "75a3", or None
+        for unrecognised names (treated as fallback/all-devices).
     """
     if deviceName is None:
         return None
@@ -49,7 +48,7 @@ def parseDeviceNameToHex(deviceName: Optional[str]) -> Optional[str]:
         return match.group(1)
         #return int(match.group(1), 16)
 
-    raise ValueError(f"Invalid device name format: '{deviceName}', expected 'Device XXXX'")
+    return None
 
 
 def _extractPciChipIds(pred: Optional[Properties.Predicate]) -> frozenset[int]:

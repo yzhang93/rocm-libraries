@@ -1219,6 +1219,11 @@ namespace TensileLite
                 return rejectFast("amaxD");
             }
 
+            if(problem.usePartialRMS())
+            {
+                return rejectFast("partialRMS");
+            }
+
             if(problem.useE())
             {
                 return rejectFast("useE");
@@ -2027,7 +2032,138 @@ namespace TensileLite
                 {
                     ws[dIndex] = resultD;
                 }
-                dPtr[dIndex] = SaturateCast<typename Inputs::DType>(resultD);
+                if constexpr(notCmplxAmaxD)
+                {
+                    if(problem.usePartialRMS() && inputs.partialBuf != nullptr
+                       && inputs.rmsGamma != nullptr)
+                    {
+                        // mCoord is the M index, nCoord is the N index in D.
+                        size_t mCoord = dCoord[0];
+                        size_t nCoord = dCoord[1];
+
+                        // The PartialRMS epilogue operates on the raw GEMM accumulator
+                        // (value = A*B, before alpha/beta). The store path applies
+                        // alpha and beta separately, matching the kernel's execution order:
+                        //   1. rC = A*B  (MFMA accumulation)
+                        //   2. rC *= gamma  (PartialRMS epilogue)
+                        //   3. D = bf16(alpha*rC + beta*C)  (standard store)
+                        //   4. partialBuf[m,t] += rC_pre_gamma[m,n]²  (PartialRMS epilogue)
+                        float hF = static_cast<float>(value);
+                        if(problem.partialRMSResidualAdd() && inputs.residual != nullptr)
+                        {
+                            // residual is col-major [M x N_hidden]: element offset = n*M + m.
+                            size_t residualIdx = nCoord * d.sizes()[0] + mCoord;
+                            float  resVal = static_cast<float>(
+                                GetValue<float>(rocisa::DataType::BFloat16,
+                                                inputs.residual, (int)residualIdx, aConjugate));
+                            hF += resVal;
+                        }
+
+                        // D = bf16(alpha * gamma * raw_hF + beta * C) — matches kernel store path.
+                        // partialBuf is computed in a separate full pass after this loop.
+                        float gammaVal = static_cast<float>(
+                            GetValue<float>(rocisa::DataType::BFloat16,
+                                            inputs.rmsGamma, (int)nCoord, aConjugate));
+                        float dVal = static_cast<float>(alpha) * hF * gammaVal;
+                        if(beta != zero)
+                            dVal += static_cast<float>(beta)
+                                    * static_cast<float>(cPtr[cIndex]);
+                        dPtr[dIndex] = SaturateCast<typename Inputs::DType>(dVal);
+                    }
+                    else
+                    {
+                        dPtr[dIndex] = SaturateCast<typename Inputs::DType>(resultD);
+                    }
+                }
+                else
+                {
+                    dPtr[dIndex] = SaturateCast<typename Inputs::DType>(resultD);
+                }
+            }
+
+            // Compute partialBuf for each position the validator will check.
+            // The sparse D loop above cannot accumulate partialBuf correctly because
+            // it only visits a subset of (m, n) pairs while partialBuf needs the
+            // full tile sum over all n in each tile. This targeted pass computes
+            // the correct Σx² = Σ_{n in tile} (A*B)[m,n]² for each validated position.
+            if constexpr(notCmplxAmaxD)
+            {
+                if(problem.usePartialRMS() && inputs.partialBuf != nullptr)
+                {
+                    size_t mt1 = problem.partialRMSMT1() > 0 ? problem.partialRMSMT1() : 16;
+
+                    auto const& pbTensor
+                        = problem.tensors()[ContractionProblemGemm::TENSOR::PARTIALBUF];
+                    size_t pbValidStride = 1;
+                    if(elementsToValidate > 0
+                       && elementsToValidate < pbTensor.totalLogicalElements())
+                        pbValidStride = NextPrime(
+                            pbTensor.totalAllocatedElements() / elementsToValidate);
+
+                    float* pb = static_cast<float*>(inputs.partialBuf);
+
+                    // Zero before recomputing so stale values from the D loop don't linger.
+                    std::fill(pb, pb + pbTensor.totalAllocatedElements(), 0.0f);
+
+                    omp_set_num_threads(MAX_OMP_THREADS);
+#pragma omp parallel for schedule(dynamic)
+                    for(size_t pbNum = 0; pbNum < pbTensor.totalLogicalElements();
+                        pbNum += pbValidStride)
+                    {
+                        std::vector<int64_t> pbCoord(pbTensor.dimensions());
+                        CoordNumbered(pbNum,
+                                      pbCoord.begin(),
+                                      pbCoord.end(),
+                                      pbTensor.sizes().begin(),
+                                      pbTensor.sizes().end());
+                        size_t pbIdx = pbTensor.index(pbCoord);
+                        size_t m_row = static_cast<size_t>(pbCoord[0]);
+                        size_t t_col = static_cast<size_t>(pbCoord[1]);
+                        size_t nLo   = t_col * mt1;
+                        size_t nHi
+                            = std::min(nLo + mt1, static_cast<size_t>(d.sizes()[1]));
+
+                        float tileSum = 0.0f;
+                        for(size_t n = nLo; n < nHi; ++n)
+                        {
+                            // (A*B)[m_row, n] = Σ_k A[k, m_row] * B[k, n].
+                            std::vector<int64_t> aCoordL(a.dimensions(), 0);
+                            std::vector<int64_t> bCoordL(b.dimensions(), 0);
+                            for(auto const& fi : freeIndicesA)
+                                aCoordL[fi.i] = static_cast<int64_t>(m_row);
+                            for(auto const& fi : freeIndicesB)
+                                bCoordL[fi.i] = static_cast<int64_t>(n);
+
+                            float dot = 0.0f;
+                            for(size_t k = 0; k < boundSize[0]; ++k)
+                            {
+                                aCoordL[boundIndices[0].a] = static_cast<int64_t>(k);
+                                bCoordL[boundIndices[0].b] = static_cast<int64_t>(k);
+                                size_t aI = a.index(aCoordL);
+                                size_t bI = b.index(bCoordL);
+                                dot += GetValue<float>(a.dataType(), inputs.a,
+                                                        static_cast<int>(aI), false)
+                                       * GetValue<float>(b.dataType(), inputs.b,
+                                                         static_cast<int>(bI), false);
+                            }
+
+                            if(problem.partialRMSResidualAdd()
+                               && inputs.residual != nullptr)
+                            {
+                                size_t residualIdx
+                                    = n * static_cast<size_t>(d.sizes()[0]) + m_row;
+                                dot += static_cast<float>(
+                                    GetValue<float>(rocisa::DataType::BFloat16,
+                                                    inputs.residual,
+                                                    static_cast<int>(residualIdx),
+                                                    false));
+                            }
+
+                            tileSum += dot * dot;
+                        }
+                        pb[pbIdx] = tileSum;
+                    }
+                }
             }
 
             if(problem.outputAmaxD())
