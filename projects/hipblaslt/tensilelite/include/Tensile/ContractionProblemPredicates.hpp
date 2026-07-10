@@ -2086,6 +2086,44 @@ namespace TensileLite
                 }
             };
 
+            // Routes fused-RMSNorm (PartialRMS) problems to PartialRMS solutions and keeps
+            // normal problems away from them. Mirrors UseGradientEqual. Emitted by
+            // Contractions.py ProblemType.predicates(); logic files generated before this
+            // predicate existed simply omit it (older behavior) until regenerated.
+            struct UsePartialRMSEqual
+                : public Predicate_CRTP<UsePartialRMSEqual, ContractionProblemGemm>
+            {
+                enum
+                {
+                    HasIndex = false,
+                    HasValue = true
+                };
+                bool value;
+
+                UsePartialRMSEqual() = default;
+                UsePartialRMSEqual(bool value)
+                    : value(value)
+                {
+                }
+
+                static std::string Type()
+                {
+                    return "UsePartialRMS";
+                }
+
+                virtual bool operator()(ContractionProblemGemm const& problem) const override
+                {
+                    return problem.usePartialRMS() == value;
+                }
+
+                virtual bool debugEval(ContractionProblemGemm const& problem,
+                                       std::ostream&                 stream) const override
+                {
+                    return debugEvalCmp(
+                        problem, stream, "prob", problem.usePartialRMS(), "==", "sol", value);
+                }
+            };
+
             // Activation
             struct ActivationCheck : public Predicate_CRTP<ActivationCheck, ContractionProblemGemm>
             {

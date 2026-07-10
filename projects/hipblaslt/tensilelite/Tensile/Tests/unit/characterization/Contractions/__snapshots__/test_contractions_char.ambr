@@ -58,7 +58,7 @@
 # ---
 # name: test_problem_type_predicates
   dict({
-    'count': 26,
+    'count': 27,
     'tags': list([
       'Activation',
       'ActivationComputeType',
@@ -83,6 +83,7 @@
       'UseBias',
       'UseE',
       'UseGradient',
+      'UsePartialRMS',
       'UseScaleAB',
       'UseScaleAlphaVec',
       'UseScaleCD',

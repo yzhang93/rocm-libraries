@@ -465,6 +465,31 @@ namespace
     }
 }
 
+// Resolve the opaque fused-epilogue handle into the layer-visible POD declared in
+// rocblaslt-types.h. Defined here because the handle definition is private to this
+// translation unit; the rocblaslt / TensileLite layers only see the forward declaration.
+// The enclosing public API in this file is extern "C"; this helper is declared with C++
+// linkage (it lives among C++ types in rocblaslt-types.h), so force C++ linkage here to
+// match the declaration.
+extern "C++" bool rocblaslt_resolve_fused_epilogue(const hipblasLtFusedEpilogueDescriptor* desc,
+                                                   RocblasltFusedEpilogueInfo&             out)
+{
+    if(desc == nullptr)
+        return false;
+    out.hasResidualAdd
+        = fused_epilogue_has_stage(desc, HIPBLASLT_FUSEABLE_EPILOGUE_RESIDUAL_ADD);
+    out.hasRMSNorm = fused_epilogue_has_stage(desc, HIPBLASLT_FUSEABLE_EPILOGUE_RMSNORM);
+    out.hasPartialRMSStats
+        = fused_epilogue_has_stage(desc, HIPBLASLT_FUSEABLE_EPILOGUE_PARTIAL_RMSNORM_STATS);
+    out.hasRMSNormScaleApply
+        = fused_epilogue_has_stage(desc, HIPBLASLT_FUSEABLE_EPILOGUE_RMSNORM_SCALE_APPLY);
+    out.rmsnormGamma   = desc->rmsnorm_gamma;
+    out.rmsnormEps     = desc->rmsnorm_eps;
+    out.residual       = desc->residual;
+    out.residualOutput = desc->residual_output;
+    return true;
+}
+
 hipblasStatus_t hipblasLtFusedEpilogueCreate(hipblasLtFusedEpilogueDescriptor_t* desc)
 try
 {

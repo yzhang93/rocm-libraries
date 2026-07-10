@@ -110,6 +110,7 @@ namespace TensileLite
                      Base::template Pair<Predicates::Contraction::PredictionMatching>(),
                      Base::template Pair<Predicates::Contraction::GridBasedMatching>(),
                      Base::template Pair<Predicates::Contraction::UseGradientEqual>(),
+                     Base::template Pair<Predicates::Contraction::UsePartialRMSEqual>(),
                      Base::template Pair<Predicates::Contraction::ActivationCheck>(),
                      Base::template Pair<Predicates::Contraction::ActivationComputeTypeEqual>(),
                      Base::template Pair<Predicates::Contraction::ActivationNoGuardEqual>(),
@@ -442,6 +443,12 @@ namespace TensileLite
         template <typename IO>
         struct MappingTraits<Predicates::Contraction::UseGradientEqual, IO>
             : public AutoMappingTraits<Predicates::Contraction::UseGradientEqual, IO>
+        {
+        };
+
+        template <typename IO>
+        struct MappingTraits<Predicates::Contraction::UsePartialRMSEqual, IO>
+            : public AutoMappingTraits<Predicates::Contraction::UsePartialRMSEqual, IO>
         {
         };
 

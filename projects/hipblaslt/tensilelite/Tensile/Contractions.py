@@ -402,6 +402,10 @@ class ProblemType:
             predicates.append(ProblemPredicate("ActivationComputeType", value=self.activationComputeDataType))
             predicates.append(ProblemPredicate("ActivationNoGuard", value=self.activationNoGuard))
             predicates.append(ProblemPredicate("UseGradient", value=self.useGradient))
+            # Routes fused-RMSNorm (PartialRMS) problems to PartialRMS solutions and keeps
+            # normal problems away from them. Requires regenerating all logic so every entry
+            # carries this predicate. See docs/design/fused_epilogue_rmsnorm.md.
+            predicates.append(ProblemPredicate("UsePartialRMS", value=self.usePartialRMS))
             predicates.append(ProblemPredicate("UseBias", value=self.useBias))
             predicates.append(ProblemPredicate("UseE", value=self.useE))
             predicates.append(ProblemPredicate("DataTypeE", value=self.eType))

@@ -2117,6 +2117,24 @@ namespace
         tensileProblem.setParams().setStreamKTileSchedulingMode(prob.streamk_tile_scheduling_ext);
         tensileProblem.setParams().setSmCountTarget(prob.sm_count_target);
 
+        // Fused RMSNorm epilogue (full flow): translate the attached composable fused-epilogue
+        // chain into the TensileLite PartialRMS problem flags so solution selection matches the
+        // fused-RMSNorm (PartialRMS) kernels. The single RMSNorm stage drives the full flow; the
+        // decomposed producer/consumer stages are wired separately. gamma/partialBuf/residual
+        // pointers and the partialBuf workspace carve are handled on the launch path. This stays
+        // dormant until the HIPBLASLT_MATMUL_DESC_FUSED_EPILOGUE NOT_SUPPORTED gate in
+        // amd_detail/hipblaslt.cpp is lifted (after Kernel 2 lands). See
+        // docs/design/fused_epilogue_rmsnorm.md.
+        RocblasltFusedEpilogueInfo fusedInfo;
+        if(rocblaslt_resolve_fused_epilogue(prob.fused_epilogue, fusedInfo))
+        {
+            if(fusedInfo.hasRMSNorm)
+            {
+                tensileProblem.setUsePartialRMS(true);
+                tensileProblem.setPartialRMSResidualAdd(fusedInfo.hasResidualAdd);
+            }
+        }
+
         // set AmaxD
         tensileProblem.setOutputAmaxD(prob.amaxD != nullptr);
         tensileProblem.setAmaxD(compute_type, true);
@@ -2475,6 +2493,19 @@ namespace
         inputs.workspaceSize = prob.workspaceSize;
 
         inputs.Synchronizer = prob.Synchronizer;
+
+        // Fused RMSNorm epilogue (full flow) inputs. The K1 producer consumes gamma, and the
+        // residual tensor when residual-add is chained; both are caller-owned device pointers
+        // from the fused-epilogue descriptor. partialBuf is a transient reduction scratch that
+        // K1 writes and Kernel 2 reads; it is sized from the selected solution's macro tiles and
+        // carved from the workspace at solve time (G3), so it is intentionally left null here.
+        // Dormant until the HIPBLASLT_MATMUL_DESC_FUSED_EPILOGUE gate is lifted.
+        RocblasltFusedEpilogueInfo fusedInputs;
+        if(rocblaslt_resolve_fused_epilogue(prob.fused_epilogue, fusedInputs))
+        {
+            inputs.rmsGamma = fusedInputs.rmsnormGamma;
+            inputs.residual = fusedInputs.residual;
+        }
 
         // set bias vector
         if(is_bias_enabled(prob.epilogue))

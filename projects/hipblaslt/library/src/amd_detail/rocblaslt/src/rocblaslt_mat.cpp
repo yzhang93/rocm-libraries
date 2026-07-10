@@ -226,6 +226,11 @@ rocblaslt_status rocblaslt_matmul_impl(const rocblaslt_handle       handle,
                                         matmul_descr->streamk_tile_scheduling_ext,
                                         effective_sm_count_target(handle, matmul_descr, nullptr)};
 
+    // Forward any composable fused-epilogue chain (e.g. fused RMSNorm) attached via
+    // HIPBLASLT_MATMUL_DESC_FUSED_EPILOGUE so ConstructTensileProblem can drive the
+    // TensileLite PartialRMS problem flags. Non-owning; the descriptor outlives the call.
+    problem.fused_epilogue = matmul_descr->fused_epilogue;
+
     rocblaslt_status st = runContractionProblem(handle, algo, problem, gemmData);
 
     if(st == rocblaslt_status_success)
