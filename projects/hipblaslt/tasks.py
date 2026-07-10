@@ -517,6 +517,7 @@ def _resolve_fortran_compiler(explicit, rocm: Path):
             "{rocm}/bin/flang, then PATH flang, then PATH gfortran). "
             "Exits if none of those are found. Ignored without --clients."
         ),
+        "python": "Also build and install the low-level Python bindings (opt-in).",
     }
 )
 def build(
@@ -559,6 +560,7 @@ def build(
     # -g from --gprof and cascades onto --logic-filter's -f.
     asic_revision=None,
     fortran_compiler=None,
+    python=False,
 ):
     _supported_distros()
 
@@ -866,6 +868,26 @@ def build(
             _elevate(c, f"dnf install {build_subdir}/hipblaslt-*.rpm")
         elif distro in ("sles", "opensuse-leap"):
             _elevate(c, f"zypper -n --no-gpg-checks install {build_subdir}/hipblaslt-*.rpm")
+
+    # ---------------------------------------------------------------------------
+    # Optional: low-level Python bindings (opt-in via --python)
+    # ---------------------------------------------------------------------------
+    if python:
+        py_dir = ROOT_PATH / "python"
+        install_dir = (ROOT_PATH / "hipblaslt-install").as_posix()
+        hipblaslt_cmake_dir = f"{install_dir}/lib/cmake/hipblaslt"
+        config_settings = (
+            f"--config-settings=cmake.args=-DROCM_PATH={rocm_s};"
+            f"-Dhipblaslt_DIR={hipblaslt_cmake_dir}"
+        )
+        with c.cd(str(py_dir)):
+            # Uses whichever pip/python is active when invoke build is called.
+            # Run `invoke build --python` from within `conda activate pydev313`
+            # (or equivalent) so this installs into the intended environment.
+            c.run(
+                f"pip install --no-build-isolation -e . {config_settings}",
+                env={"ROCM_PATH": rocm_s},
+            )
 
 
 # ---------------------------------------------------------------------------
