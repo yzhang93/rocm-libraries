@@ -3626,7 +3626,35 @@ namespace TensileLite
                                                        : calculateAutoGSU(problem, &hardware);
             size += requiredWorkspaceSizeGsu(problem, hardware, gsu);
         }
+
+        // Fused RMSNorm (full flow): the K1 producer writes a transient per-tile
+        // partial-sum-of-squares buffer that the reduce-and-apply Kernel 2 consumes. It is
+        // carved from the tail of the workspace (after any GSU/StreamK region), so account
+        // for it here; the launch path uses partialRMSPartialBufBytes() to locate the offset
+        // as (requiredWorkspaceSize - partialBufBytes).
+        if(sizeMapping.partialRMS)
+            size += partialRMSPartialBufBytes(problem);
+
         return size;
+    }
+
+    size_t ContractionSolution::partialRMSPartialBufBytes(Problem const& problem) const
+    {
+        if(!sizeMapping.partialRMS)
+            return 0;
+
+        const size_t mt0 = sizeMapping.macroTile.x;
+        const size_t mt1 = sizeMapping.macroTile.y;
+        if(mt0 == 0 || mt1 == 0)
+            return 0;
+
+        const size_t M     = problem.d().sizes()[0];
+        const size_t N     = problem.d().sizes()[1];
+        const size_t batch = problem.d().sizes()[2];
+
+        const size_t mPadded = ((M + mt0 - 1) / mt0) * mt0; // K1 writes padded rows
+        const size_t nTilesN = (N + mt1 - 1) / mt1;         // one partial per N macro-tile
+        return mPadded * nTilesN * batch * sizeof(float);
     }
 
     size_t ContractionSolution::requiredWorkspaceSizeGsu(Problem const&  problem,

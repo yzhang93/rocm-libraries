@@ -2394,6 +2394,20 @@ namespace
         tensileProblem.setParams().setStreamKTileSchedulingMode(prob.streamk_tile_scheduling_ext);
         tensileProblem.setParams().setSmCountTarget(prob.sm_count_target);
 
+        // Fused RMSNorm full flow: this per-call refresh is used by getBestSolutions (heuristic
+        // selection) and runContractionProblem, so it must set the PartialRMS problem flags too
+        // (ConstructTensileProblem alone is not enough — the cached problem is refreshed here on
+        // every call). Without this, selection would route the fused problem to a normal solution.
+        {
+            RocblasltFusedEpilogueInfo fusedInfo;
+            if(rocblaslt_resolve_fused_epilogue(prob.fused_epilogue, fusedInfo)
+               && fusedInfo.hasRMSNorm)
+            {
+                tensileProblem.setUsePartialRMS(true);
+                tensileProblem.setPartialRMSResidualAdd(fusedInfo.hasResidualAdd);
+            }
+        }
+
         // set E
         if(is_e_enabled(prob.epilogue))
         {
@@ -3323,6 +3337,115 @@ bool useRocRoller(rocblaslt_handle handle, const RocblasltContractionProblem& pr
 #endif
 
 /******************************************************************************
+ * Fused-RMSNorm "Kernel 2" (reduce-and-apply). Host-launched companion to the *
+ * TensileLite PartialRMS GEMM (K1): reduces K1's per-tile partial sums-of-     *
+ * squares and applies the per-row RMSNorm scale to D in place. The code object *
+ * partial_rms_epilogue_<arch>.co is shipped by device-library/partial-rms and  *
+ * loaded like the matrix-transform kernel (single hard-coded kernel name).     *
+ ******************************************************************************/
+namespace
+{
+    std::optional<std::filesystem::path> partialRmsCodeObjectPath()
+    {
+        int             deviceId{};
+        hipDeviceProp_t props{};
+        if(hipGetDevice(&deviceId) != hipSuccess
+           || hipGetDeviceProperties(&props, deviceId) != hipSuccess)
+            return std::nullopt;
+
+        std::string archName = props.gcnArchName;
+        auto        colonPos = archName.find(':');
+        if(colonPos != std::string::npos)
+            archName = archName.substr(0, colonPos);
+
+        auto relpath = std::filesystem::path(archName)
+                       / ("partial_rms_epilogue_" + archName + ".co");
+        return rocblaslt_find_library_relative_path(relpath);
+    }
+
+    const std::string& partialRmsCodeObjectFileName()
+    {
+        static const std::string name = [] {
+            auto path = partialRmsCodeObjectPath();
+            return path ? path->filename().string() : std::string{};
+        }();
+        return name;
+    }
+
+    // One persistent adapter per device, with the code-object dir set once (mirrors
+    // rocblaslt_transform.cpp::transformAdapter).
+    TensileLite::hip::SolutionAdapter& partialRmsAdapter()
+    {
+        using AdapterPtr     = std::unique_ptr<TensileLite::hip::SolutionAdapter>;
+        static auto& adapters = []() -> std::vector<AdapterPtr>& {
+            static std::vector<AdapterPtr> a;
+            int                            numDevices{};
+            HIP_CHECK_EXC(hipGetDeviceCount(&numDevices));
+            for(int i = 0; i < numDevices; ++i)
+                a.emplace_back(new TensileLite::hip::SolutionAdapter);
+            auto coPath = partialRmsCodeObjectPath();
+            if(coPath)
+            {
+                const std::string coFolder = coPath->parent_path().string();
+                for(auto& adp : a)
+                {
+                    try
+                    {
+                        adp->codeObjectDir(coFolder);
+                    }
+                    catch(const std::runtime_error&)
+                    {
+                    }
+                }
+            }
+            return a;
+        }();
+
+        int deviceId{};
+        HIP_CHECK_EXC(hipGetDevice(&deviceId));
+        return *adapters.at(deviceId);
+    }
+
+    // Launch partial_rms_epilogue on `stream` after K1 has completed (same stream => ordered).
+    // Kernarg layout matches PartialRmsEpilogueGenerator: ptrC(D), ptrD(partialBuf), M, N,
+    // nD(=nTilesN), invD(=1/N), eps. block=(256,1,1), grid=(ceil(M/256), ceil(N/256), 1).
+    hipError_t launchPartialRmsEpilogue(void*       D,
+                                        void*       partialBuf,
+                                        uint32_t    M,
+                                        uint32_t    N,
+                                        uint32_t    nTilesN,
+                                        float       eps,
+                                        hipStream_t stream)
+    {
+        const float invD = N ? (1.0f / static_cast<float>(N)) : 0.0f;
+
+        TensileLite::KernelArguments kArgs(false);
+        kArgs.appendAligned("ptrC", D);
+        kArgs.appendAligned("ptrD", partialBuf);
+        kArgs.appendAligned("M", M);
+        kArgs.appendAligned("N", N);
+        kArgs.appendAligned("nD", nTilesN);
+        kArgs.appendAligned("invD", invD);
+        kArgs.appendAligned("eps", eps);
+
+        constexpr uint32_t block = 256;
+        const uint32_t     gridX = (M + block - 1) / block;
+        const uint32_t     gridY = (N + block - 1) / block;
+
+        TensileLite::KernelInvocation invocation{"partial_rms_epilogue",
+                                                 partialRmsCodeObjectFileName(),
+                                                 false,
+                                                 {1, 1, 1},
+                                                 {block, 1, 1},
+                                                 {gridX, gridY, 1},
+                                                 {gridX * block, gridY, 1},
+                                                 0,
+                                                 kArgs};
+        return partialRmsAdapter().launchKernel(invocation, stream, nullptr, nullptr);
+    }
+}
+
+/******************************************************************************
  * runContractionProblem calls Tensile to run a contraction problem described *
  * by RocblasltContractionProblem *
  ******************************************************************************/
@@ -3498,7 +3621,39 @@ rocblaslt_status runContractionProblem(rocblaslt_handle                   handle
             // set XCC=1 to param when this is a fallback solution
             data->problem.setParams().setWGMXCC((isCUFallback ? 1 : 0));
 
-            auto kernels = solution->solve(data->problem, GetTensileInputs(prob), *hardware);
+            // Fused RMSNorm full flow (G3): carve the transient partialBuf from the workspace
+            // tail (after any GSU/StreamK region) so K1 can write it, and gather the values
+            // Kernel 2 needs. inputs.partialBuf must be set on the inputs handed to solve() so
+            // K1's arg-pack (ContractionSolution::singleCallArgs) receives a valid pointer.
+            void*    partialRmsBuf     = nullptr;
+            uint32_t partialRmsNTilesN = 0;
+            float    partialRmsEps     = 0.f;
+            if(solution->sizeMapping.partialRMS)
+            {
+                // Kernel 2 column addressing uses signed 32-bit (col * M * 2); enforce the limit.
+                if(prob.m > 32767)
+                {
+                    log_error(__func__,
+                              "fused RMSNorm partial_rms_epilogue requires M <= 32767");
+                    return rocblaslt_status_not_implemented;
+                }
+                const size_t pbBytes = solution->partialRMSPartialBufBytes(data->problem);
+                const size_t total   = solution->requiredWorkspaceSize(data->problem, *hardware);
+                if(pbBytes && prob.workspace && total >= pbBytes)
+                    partialRmsBuf = static_cast<uint8_t*>(prob.workspace) + (total - pbBytes);
+
+                const size_t mt1  = solution->sizeMapping.macroTile.y;
+                partialRmsNTilesN = mt1 ? static_cast<uint32_t>((prob.n + mt1 - 1) / mt1) : 0;
+
+                RocblasltFusedEpilogueInfo fInfo;
+                if(rocblaslt_resolve_fused_epilogue(prob.fused_epilogue, fInfo))
+                    partialRmsEps = fInfo.rmsnormEps;
+            }
+
+            auto tensileInputs = GetTensileInputs(prob);
+            if(solution->sizeMapping.partialRMS)
+                tensileInputs.partialBuf = partialRmsBuf;
+            auto kernels = solution->solve(data->problem, tensileInputs, *hardware);
             // Remove this after supports getting comgr buffers from hip.
             bool isPreloaded = false;
             if(rocblaslt::Debug::Instance().preload())
@@ -3532,6 +3687,23 @@ rocblaslt_status runContractionProblem(rocblaslt_handle                   handle
             }
             status = hip2RocStatus(
                 adapter->launchKernels(kernels, prob.stream, nullptr, nullptr, isPreloaded));
+
+            // Fused RMSNorm full flow (G3): after K1 (GEMM + partial-stats producer) completes,
+            // launch Kernel 2 on the same stream to reduce partialBuf and apply the per-row
+            // RMSNorm scale to D in place.
+            if(status == rocblaslt_status_success && solution->sizeMapping.partialRMS
+               && partialRmsBuf != nullptr)
+            {
+                status = hip2RocStatus(
+                    launchPartialRmsEpilogue(reinterpret_cast<void*>(prob.D),
+                                             partialRmsBuf,
+                                             static_cast<uint32_t>(prob.m),
+                                             static_cast<uint32_t>(prob.n),
+                                             partialRmsNTilesN,
+                                             partialRmsEps,
+                                             prob.stream));
+            }
+
             if(rocblaslt::Debug::Instance().printLogAsMarker())
                 rocblaslt::Debug::Instance().logMarkerStop();
         }

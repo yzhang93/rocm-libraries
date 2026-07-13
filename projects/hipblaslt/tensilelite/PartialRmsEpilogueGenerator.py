@@ -780,3 +780,30 @@ def build_partial_rms_epilogue(chip: str, M: int = 0, N: int = 0, K: int = 0) ->
         _meta_str((meta,)),
     ])
     return kStr, funcName
+
+
+def main():
+    """CLI to emit the partial_rms_epilogue assembly to a file.
+
+    Mirrors the -o/--arch/--toolchain interface of the ExtOp generators
+    (LayerNormGenerator/SoftmaxGenerator/AMaxGenerator) so the device-library
+    CMake can generate + assemble it the same way. The kernel is M-agnostic at
+    runtime (M is a kernarg), so no problem size is baked in here.
+    """
+    import argparse
+
+    parser = argparse.ArgumentParser(
+        description="Generate partial_rms_epilogue (fused RMSNorm reduce-and-apply) assembly.")
+    parser.add_argument("-o", "--output", required=True, help="Output assembly (.s) path.")
+    parser.add_argument("--arch", required=True, help="GPU architecture, e.g. gfx950.")
+    # Accepted for CLI parity with the ExtOp generators; assembly is compiled by CMake.
+    parser.add_argument("--toolchain", default=None, help="C++ compiler path (unused here).")
+    args = parser.parse_args()
+
+    asmStr, _ = build_partial_rms_epilogue(args.arch)
+    with open(args.output, "w") as f:
+        f.write(asmStr)
+
+
+if __name__ == "__main__":
+    main()

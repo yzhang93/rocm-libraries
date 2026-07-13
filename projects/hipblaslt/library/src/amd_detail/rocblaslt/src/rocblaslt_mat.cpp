@@ -414,6 +414,9 @@ rocblaslt_status rocblaslt_gemm_create_cpp_impl(const rocblaslt_handle          
                                         matmul_descr->bias_stride,
                                         matmul_descr->streamk_tile_scheduling_ext,
                                         effective_sm_count_target(handle, matmul_descr, nullptr)};
+    // Forward the fused-epilogue chain (ext hipblaslt_ext::Gemm create path) so the cached
+    // problem drives PartialRMS solution selection, matching the C-API matmul/heuristic paths.
+    problem.fused_epilogue = matmul_descr->fused_epilogue;
     return gemmCreate(problem, gemmData, gemmCount);
 }
 
