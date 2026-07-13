@@ -88,6 +88,16 @@ def _solution_state(sol, kernelName):
         d["GlobalReadPerMfma"] = float(d["GlobalReadPerMfma"])
     if "StaggerUStride" in d:
         d["StaggerUStride"] = int(d["StaggerUStride"])
+
+    # The C++ runtime computes the GPU workgroup dispatch size as
+    # WorkGroup[0] * WorkGroup[1] * WorkGroup[2].  For subtile MFMA kernels
+    # WorkGroup stores the MFMA tile shape [mfma_m, mfma_n, 1] which is
+    # unrelated to NumThreads.  Override it so the dispatch equals NumThreads,
+    # preventing hipErrorLaunchFailure when NumThreads < WorkGroup product.
+    num_threads = d.get("NumThreads", 0)
+    if num_threads > 0:
+        d["WorkGroup"] = [num_threads, 1, 1]
+
     return d
 
 
