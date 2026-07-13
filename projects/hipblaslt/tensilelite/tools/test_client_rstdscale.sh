@@ -130,7 +130,7 @@ COMMON_ARGS=(
     --f32-xdl-math-op Float
     --use-rstd-scale
     --num-benchmarks 1
-    --num-elements-to-validate 128
+    --num-elements-to-validate -1
     --device-idx 0
 )
 

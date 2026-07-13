@@ -2,7 +2,7 @@
 # SPDX-License-Identifier: MIT
 """Pytest suite for the fused GEMM+RstdScale (K3) Subtile epilogue (gfx950, bf16).
 
-Exercises a comprehensive set of (M, K) shapes and N_hidden values, verifying:
+Exercises a comprehensive set of M shapes with fixed N_hidden=64, verifying:
   - y output (bf16, tol=2e-2): (h2 @ W1.T) * rstd[:, None]
 
 The fixture is parametrized over wg_n (MIWaveGroup[1]):
@@ -10,7 +10,7 @@ The fixture is parametrized over wg_n (MIWaveGroup[1]):
   wg_n=2: two-wave, N_out=128
 
 N_out is pinned to MacroTile1 = 64 * wg_n (row-containment invariant).
-N_hidden (GEMM2 contraction dim) is fixed per solution to 64.
+N_hidden (GEMM2 contraction dim) is fixed to 64 for all shapes.
 """
 
 import math
@@ -42,43 +42,28 @@ requires_gfx950 = pytest.mark.skipif(
 # MIWaveGroup[1] values to exercise: single-wave and two-wave.
 _WG_N = [1, 2]
 
-# Shape matrix: (M, K, label).
-# K here is the "outer" K for K1 — reusing the same shape list from test_gemm_partial_rms.
-# For K3, N_hidden (GEMM2 contraction dim) is fixed per solution.
+# Shape list: (M, label). N_hidden is fixed to 64 for all shapes.
 _SHAPES = [
-    # --- full-tile M, varying K ---
-    (   64,    1,  "M64_K1"),
-    (   64,   32,  "M64_K32"),
-    (   64,   64,  "M64_K64"),
-    (   64,   96,  "M64_K96"),
-    (   64,  128,  "M64_K128"),
-    (   64,  256,  "M64_K256"),
-    (   64,  512,  "M64_K512"),
-    (   64, 1024,  "M64_K1024"),
-    (   64, 4096,  "M64_K4096"),
-    # --- larger full-tile M ---
-    (  128,  128,  "M128_K128"),
-    (  256,   64,  "M256_K64"),
-    (  512,  512,  "M512_K512"),
-    ( 1024,  128,  "M1024_K128"),
-    ( 2048, 4096,  "M2048_K4096"),
-    # --- edge-tile M (non-multiples of MT0=64) ---
-    (    1,   64,  "M1_K64"),
-    (   16,   64,  "M16_K64"),
-    (   32,   64,  "M32_K64"),
-    (   48,   64,  "M48_K64"),
-    (   80,   96,  "M80_K96"),
-    (  100,  128,  "M100_K128"),
-    (  130,   37,  "M130_K37"),
-    (  200,   64,  "M200_K64"),
-    (  513,  256,  "M513_K256"),
-    ( 1000, 1024,  "M1000_K1024"),
-    # --- prime K ---
-    (   64,   31,  "M64_K31"),
-    (   64,   97,  "M64_K97"),
-    (   64,  127,  "M64_K127"),
-    (  128,   61,  "M128_K61"),
-    ( 1024, 4093,  "M1024_K4093"),
+    # full-tile M (multiples of MT0=64).
+    (   64,  "M64"),
+    (  128,  "M128"),
+    (  256,  "M256"),
+    (  512,  "M512"),
+    ( 1024,  "M1024"),
+    ( 2048,  "M2048"),
+    # edge-tile M (non-multiples of MT0=64).
+    (    1,  "M1"),
+    (   16,  "M16"),
+    (   32,  "M32"),
+    (   48,  "M48"),
+    (   63,  "M63"),
+    (   65,  "M65"),
+    (   80,  "M80"),
+    (  100,  "M100"),
+    (  130,  "M130"),
+    (  200,  "M200"),
+    (  513,  "M513"),
+    ( 1000,  "M1000"),
 ]
 
 # N_hidden for GEMM2 contraction dim (fixed per solution).
@@ -208,8 +193,8 @@ def _run_shape(solution, kernel_name, hsaco, chip, M, N_hidden):
 # ---------------------------------------------------------------------------
 
 @requires_gfx950
-@pytest.mark.parametrize("M,K,label", _SHAPES, ids=[s[2] for s in _SHAPES])
-def test_k3_shape(k3_kernel, M, K, label):
+@pytest.mark.parametrize("M,label", _SHAPES, ids=[s[1] for s in _SHAPES])
+def test_k3_shape(k3_kernel, M, label):
     """Verify K3 (RstdScale) output y for shape M x N_out x N_hidden."""
     solution, kernel_name, hsaco, chip = k3_kernel
     N_out    = solution["MacroTile1"]
