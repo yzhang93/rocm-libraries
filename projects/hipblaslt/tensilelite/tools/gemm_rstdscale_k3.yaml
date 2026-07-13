@@ -1,0 +1,60 @@
+# Copyright Advanced Micro Devices, Inc., or its affiliates.
+# SPDX-License-Identifier: MIT
+
+GlobalParameters:
+  MinimumRequiredVersion: 5.0.0
+
+BenchmarkProblems:
+  -
+    - # ProblemType — bf16 TN GEMM with RstdScale epilogue
+      OperationType: GEMM
+      DataType: b
+      DestDataType: b
+      ComputeDataType: s
+      HighPrecisionAccumulate: True
+      TransposeA: True
+      TransposeB: False
+      UseBeta: True
+      Batched: True
+      StridedBatched: True
+      GroupedGemm: False
+      UseBias: 0
+      UseScaleAB: ""
+      UseScaleCD: False
+      UseScaleAlphaVec: 0
+      Sparse: 0
+
+    - # BenchmarkProblemSizeGroup
+      BenchmarkCommonParameters:
+        - KernelLanguage: ["Assembly"]
+      ForkParameters:
+        - MatrixInstruction:
+            - [16, 16, 32, 1, 1, 4, 4, 1, 1]   # MT 64x64,  wg_n=1
+            - [16, 16, 32, 1, 1, 4, 4, 1, 2]   # MT 64x128, wg_n=2
+        - StreamK: [3]
+        - StreamKForceDPOnly: [1]
+        - StreamKAtomic: [0]
+        - GlobalSplitU: [1]
+        - ScheduleIterAlg: [3]
+        - PrefetchGlobalRead: [1]
+        - DirectToLds: [1]
+        - UseSubtileImpl: [True]
+        - RstdScale: [True]
+        - StaggerU: [0]
+        - DepthU: [64]
+        - LdsPadA: [-1]
+        - LdsPadB: [-1]
+        - StoreVectorWidth: [-1]
+        - GlobalReadVectorWidthA: [-1]
+        - GlobalReadVectorWidthB: [-1]
+        - PreloadKernArgs: [False]
+        - 1LDSBuffer: [0]
+        - PrefetchAcrossPersistent: [0]
+      BenchmarkFinalParameters:
+        - ProblemSizes:
+            - Exact: [4096, 64, 1, 4096]
+
+LibraryLogic:
+  ScheduleName: "rstdscale_k3"
+  DeviceNames: ["Device 75a0", "Device 75b0", "Device 75a2"]
+  ArchitectureName: "gfx950"

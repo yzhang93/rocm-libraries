@@ -577,7 +577,7 @@ def pruneModeName(mode):
     if mode == 5: return 'Prune0X0X'
     if mode == 6: return 'Prune00XX'
 
-def writeClientConfigIni(forBenchmark, problemSizes, biasTypeArgs, factorDimArgs, activationArgs, icacheFlushArgs, problemType, sourceDir, codeObjectFiles, resultsFileName, parametersFilePath, deviceId: int, gfxName: str, libraryFile, probSolMap={}, partialRMSMT0=0, partialRMSMT1=0, anyPartialRMSResidualAdd=False):
+def writeClientConfigIni(forBenchmark, problemSizes, biasTypeArgs, factorDimArgs, activationArgs, icacheFlushArgs, problemType, sourceDir, codeObjectFiles, resultsFileName, parametersFilePath, deviceId: int, gfxName: str, libraryFile, probSolMap={}, partialRMSMT0=0, partialRMSMT1=0, anyPartialRMSResidualAdd=False, useRstdScale=False):
 
     assert os.path.exists(sourceDir), f"sourceDir={sourceDir} does not exist"
     # libraryFile must point at the per-base TensileLibrary{,.yaml,.dat}; the
@@ -625,6 +625,7 @@ def writeClientConfigIni(forBenchmark, problemSizes, biasTypeArgs, factorDimArgs
             param('partial-rms-mt0', partialRMSMT0)
         if usePartialRMS and partialRMSMT1 > 0:
             param('partial-rms-mt1', partialRMSMT1)
+        param('use-rstd-scale', useRstdScale)
         param('use-scaleAB',   problemType.useScaleAB)
         param('use-scaleCD',   problemType.useScaleCD)
         param('use-scaleAlphaVec',   problemType.useScaleAlphaVec)
@@ -800,6 +801,7 @@ def writeClientConfig(
     minMT0 = 0
     minMT1 = 0
     anyResidualAdd = False
+    anyRstdScale = any(bool(sol.get("RstdScale", False)) for sol in solutions)
     if getattr(newSolution.problemType, 'usePartialRMS', False):
         mt1Values = set()
         for sol in solutions:
@@ -830,7 +832,7 @@ def writeClientConfig(
                 f"Use separate ForkParameters groups per residual-add variant."
             )
 
-    writeClientConfigIni(forBenchmark, problemSizes, biasTypeArgs, factorDimArgs, activationArgs, icacheFlushArgs, newSolution.problemType, sourceDir, codeObjectFiles, resultsFileName, filename, deviceId, gfxName, libraryFile, probSolMap, minMT0, minMT1, anyResidualAdd)
+    writeClientConfigIni(forBenchmark, problemSizes, biasTypeArgs, factorDimArgs, activationArgs, icacheFlushArgs, newSolution.problemType, sourceDir, codeObjectFiles, resultsFileName, filename, deviceId, gfxName, libraryFile, probSolMap, minMT0, minMT1, anyResidualAdd, anyRstdScale)
 
     return filename
 

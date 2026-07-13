@@ -1922,6 +1922,16 @@ namespace TensileLite
                         alpha *= scaleB;
                 }
 
+                // RstdScale (K3): multiply the raw accumulator by the per-row rstd scalar
+                // before the alpha/beta store, matching the kernel's AGPR-level multiply.
+                if(problem.useRstdScale() && inputs.rstdBuf != nullptr)
+                {
+                    size_t mCoord  = dCoord[0];
+                    float  rstdVal = GetValue<float>(rocisa::DataType::Float,
+                                                     inputs.rstdBuf, (int)mCoord, aConjugate);
+                    value *= static_cast<Accumulator>(rstdVal);
+                }
+
                 auto resultD = multiply<Accumulator>(alpha, value);
 
                 if(problem.useScaleAlphaVec())
