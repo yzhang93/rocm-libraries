@@ -1119,6 +1119,8 @@ namespace TensileLite
             if(sizeMapping.partialRMSResidualAdd)
                 args.template append<void const*>("ResidualBuf", inputs.residual);
         }
+        if(sizeMapping.rstdScale)
+            args.template append<void const*>("RstdBuf", inputs.rstdBuf);
     }
 
     inline uint32_t getNumWorkGroups(const KernelInvocation& rv)

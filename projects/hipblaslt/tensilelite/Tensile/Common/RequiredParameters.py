@@ -166,4 +166,5 @@ def getRequiredParametersMin() -> set:
         'ClusterDim',
         'PartialRMS',
         'PartialRMSResidualAdd',
+        'RstdScale',
     })

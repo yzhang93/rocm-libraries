@@ -2891,6 +2891,7 @@ namespace TensileLite
             inputs->partialBuf    = (void*)ptrs[ContractionProblemGemm::TENSOR::PARTIALBUF];
             inputs->rmsGamma      = (void*)ptrs[ContractionProblemGemm::TENSOR::RMSGAMMA];
             inputs->residual      = (void*)ptrs[ContractionProblemGemm::TENSOR::RESIDUAL];
+            inputs->rstdBuf       = (void*)ptrs[ContractionProblemGemm::TENSOR::RSTDBUF];
 
             inputs->batchA    = (void**)batchPtrs[ContractionProblemGemm::TENSOR::A];
             inputs->batchB    = (void**)batchPtrs[ContractionProblemGemm::TENSOR::B];

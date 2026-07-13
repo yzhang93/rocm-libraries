@@ -194,6 +194,8 @@ namespace TensileLite
                 m_partialRMSMT0Override = args["partial-rms-mt0"].as<size_t>();
             if(args.count("partial-rms-mt1"))
                 m_partialRMSMT1Override = args["partial-rms-mt1"].as<size_t>();
+            if(args.count("use-rstd-scale"))
+                m_useRstdScale = args["use-rstd-scale"].as<bool>();
 
             if(args.count("bias-type-args"))
                 m_biasTypeArgs = args["bias-type-args"].as<std::vector<rocisa::DataType>>();
@@ -391,6 +393,7 @@ namespace TensileLite
                             rv.back().setOutputAmaxD(m_outputAmaxD);
                             rv.back().setUsePartialRMS(m_usePartialRMS);
                             rv.back().setPartialRMSResidualAdd(m_partialRMSResidualAdd);
+                            rv.back().setUseRstdScale(m_useRstdScale);
                             rv.back().setKernelLanguage(m_kernelLanguage);
                             rv.back().setPerformanceMetric(m_performanceMetric);
                             rv.back().setDeterministicMode(m_deterministicMode);
@@ -462,6 +465,12 @@ namespace TensileLite
                                 rv.back().setPartialBuf(mPadded, nTilesN);
                                 if(m_partialRMSResidualAdd)
                                     rv.back().setResidual(bf16Type, M, nHidden);
+                            }
+                            if(m_useRstdScale)
+                            {
+                                size_t M       = rv.back().d().sizes()[0];
+                                size_t mPadded = ((M + 255) / 256) * 256;
+                                rv.back().setRstdBuf(mPadded);
                             }
                             if(j < m_activationEnumArg.size())
                             {

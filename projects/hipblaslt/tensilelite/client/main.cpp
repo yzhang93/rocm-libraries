@@ -406,6 +406,7 @@ namespace TensileLite
                 ("output-amaxD",              po::value<bool>()->default_value(false), "Output AmaxD.")
                 ("use-partial-rms",           po::value<bool>()->default_value(false), "Enable PartialRMS fused epilogue.")
                 ("partial-rms-residual-add",  po::value<bool>()->default_value(false), "PartialRMS: add residual before reduction.")
+                ("use-rstd-scale",            po::value<bool>()->default_value(false)->implicit_value(true), "Enable RstdScale (K3) fused epilogue.")
                 ("partial-rms-mt0",           po::value<size_t>()->default_value(0), "MacroTile0 for PartialRMS (0 = conservative bound).")
                 ("partial-rms-mt1",           po::value<size_t>()->default_value(0), "MacroTile1 for PartialRMS (0 = conservative bound).")
                 ("init-rmsGamma",             po::value<InitMode>()->default_value(InitMode::Random), "Init mode for RMS gamma buffer.")
@@ -556,6 +557,7 @@ namespace TensileLite
             DUMP_OPT("init-scaleAlphaVec", InitMode);
             DUMP_OPT("use-partial-rms", bool);
             DUMP_OPT("partial-rms-residual-add", bool);
+            DUMP_OPT("use-rstd-scale", bool);
             DUMP_OPT("partial-rms-mt0", size_t);
             DUMP_OPT("partial-rms-mt1", size_t);
             DUMP_OPT("init-rmsGamma", InitMode);

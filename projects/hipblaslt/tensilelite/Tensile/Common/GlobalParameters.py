@@ -497,6 +497,7 @@ defaultBenchmarkCommonParameters = [
     {"DirectToLdsMetadata": [1]},
     {"PartialRMS": [False]},
     {"PartialRMSResidualAdd": [False]},
+    {"RstdScale": [False]},
     {"UseSubtileImpl": [False]},
     {"UseSgprForGRO": [-1]},
     {"UseInstOffsetForGRO": [0]},

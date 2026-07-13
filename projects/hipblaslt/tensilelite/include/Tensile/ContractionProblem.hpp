@@ -351,6 +351,7 @@ namespace TensileLite
             RMSGAMMA      = 17, // bf16 input: RMSNorm gamma (N_hidden elements)
             PARTIALBUF    = 18, // f32 output: partial sum-of-squares [M_padded x nTilesN] row-major
             RESIDUAL      = 19, // bf16 input: residual tensor [M x N_hidden] col-major (optional)
+            RSTDBUF       = 20, // f32 input: reciprocal std-dev buffer [M] for RstdScale epilogue.
             TENSOR_COUNT
         };
 
@@ -771,6 +772,9 @@ namespace TensileLite
         size_t partialRMSMT0()         const { return m_partialRMSMT0; }
         size_t partialRMSMT1()         const { return m_partialRMSMT1; }
 
+        void setUseRstdScale(bool v) { m_useRstdScale = v; }
+        bool useRstdScale() const    { return m_useRstdScale; }
+
         void setUseBias(int useBias)
         {
             m_useBias = useBias;
@@ -965,6 +969,13 @@ namespace TensileLite
             if(m_usePartialRMS && m_partialRMSResidualAdd)
                 m_tensors[ContractionProblemGemm::TENSOR::RESIDUAL]
                     = {"residual", type, {M, nHidden}, {1, M}};
+        }
+
+        void setRstdBuf(size_t mPadded)
+        {
+            if(m_useRstdScale)
+                m_tensors[ContractionProblemGemm::TENSOR::RSTDBUF]
+                    = {"rstdBuf", rocisa::DataType::Float, {mPadded}, {1}};
         }
 
         void setSynchronizer(rocisa::DataType type, size_t length)
@@ -1472,6 +1483,7 @@ namespace TensileLite
         bool             m_partialRMSResidualAdd   = false;
         size_t           m_partialRMSMT0           = 0;
         size_t           m_partialRMSMT1           = 0;
+        bool             m_useRstdScale            = false;
         bool             m_swizzleTensorA          = false;
         bool             m_swizzleTensorB          = false;
         int              m_useBias                 = 0;
@@ -1612,6 +1624,7 @@ namespace TensileLite
         void*       partialBuf = nullptr;
         void const* rmsGamma   = nullptr;
         void const* residual   = nullptr;
+        void const* rstdBuf    = nullptr;
 
         void const* const* batchA    = nullptr;
         void const* const* batchB    = nullptr;

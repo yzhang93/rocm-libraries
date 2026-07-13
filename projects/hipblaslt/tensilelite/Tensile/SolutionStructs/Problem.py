@@ -424,6 +424,7 @@ _defaultProblemType = {
     "UseE": False,  # =True use output E to output gemm results before activation
     "UsePartialRMS":         False,
     "PartialRMSResidualAdd": False,
+    "RstdScale":             False,
     "Gradient": False,  # =True set globalWriteElements to gradient mode
     "UseBias": 0,  # =1 support bias vector on M direction, =2 support bias vector on N direction, =3 support bias vector on both M,N direction
     "BiasSrc": "D",  # This parameter is used in gradient + bias. Support A, B, D.

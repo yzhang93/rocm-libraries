@@ -1224,6 +1224,9 @@ namespace TensileLite
                 return rejectFast("partialRMS");
             }
 
+            if(problem.useRstdScale())
+                return rejectFast("rstdScale");
+
             if(problem.useE())
             {
                 return rejectFast("useE");

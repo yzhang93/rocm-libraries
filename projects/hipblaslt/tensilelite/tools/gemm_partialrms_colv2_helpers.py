@@ -236,6 +236,97 @@ def build_k1_solution(chip: str, assembler, isaInfoMap, wgN: int = 2,
     return solution
 
 
+def build_k3_solution(chip: str, assembler, isaInfoMap,
+                      N_hidden: int, N_out: int, wg_n: int = 1):
+    """Build a bf16 GEMM2 + RstdScale kernel for gfx950.
+
+    GEMM2 operands: A = h2 (M x N_hidden, bf16), B = W1 (N_out x N_hidden, bf16).
+    TN layout (TransposeA=True, TransposeB=False), contracts over N_hidden.
+    N_out must equal MacroTile1.
+    """
+    from Tensile.Common.Architectures import gfxToIsa
+    from Tensile.Common.GlobalParameters import defaultInternalSupportParams
+    from Tensile.SolutionStructs.Solution import Solution
+    from Tensile.SolutionStructs.Validators.MatrixInstruction import (
+        matrixInstructionToMIParameters,
+        validateMIParameters,
+    )
+
+    gfx = chip.split(":")[0]
+    isa = gfxToIsa(gfx)
+
+    problem_type = {
+        "OperationType":    "GEMM",
+        "DataType":         "b",    # bf16
+        "DestDataType":     "b",    # bf16
+        "ComputeDataType":  "s",    # fp32 accumulation
+        "HighPrecisionAccumulate": True,
+        "TransposeA":       True,   # A: K×M col-major (TN layout)
+        "TransposeB":       False,  # B: K×N col-major
+        "UseBeta":          True,
+        "Batched":          True,
+        "StridedBatched":   True,
+        "GroupedGemm":      False,
+        "UseBias":          0,
+        "UseScaleAB":       "",
+        "UseScaleCD":       False,
+        "UseScaleAlphaVec": 0,
+        "Sparse":           0,
+    }
+
+    # [instM, instN, instK, instB, mi4, wt1, wt0, wg0_waves, wg1_waves]
+    mi9 = [16, 16, 32, 1, 1, 4, 4, 1, wg_n]
+
+    wavefrontSize = 64
+    mi_params = matrixInstructionToMIParameters(
+        mi9, isa, wavefrontSize, problem_type, workGroup=None, isaInfoMap=isaInfoMap
+    )
+
+    config = {
+        "ProblemType":           problem_type,
+        "InternalSupportParams": defaultInternalSupportParams,
+        "ISA":                   [isa.major, isa.minor, isa.patch],
+        "CodeObjectVersion":     "6",
+        "GlobalSplitU":          1,
+        "KernelLanguage":        "Assembly",
+        "StreamK":               3,
+        "StreamKForceDPOnly":    1,
+        "StreamKAtomic":         0,
+        "ScheduleIterAlg":       3,
+        "PrefetchGlobalRead":    1,
+        "DirectToLdsA":          1,
+        "DirectToLdsB":          1,
+        "UseSubtileImpl":        True,
+        "RstdScale":             True,
+        "StaggerU":              0,
+        "DepthU":                64,
+        "LdsPadA":               -1,
+        "LdsPadB":               -1,
+        "StoreVectorWidth":      -1,
+        "GlobalReadVectorWidthA": -1,
+        "GlobalReadVectorWidthB": -1,
+        "PreloadKernArgs":       False,
+        "_1LDSBuffer":           0,
+        "PrefetchAcrossPersistent": 0,
+    }
+    config.update(mi_params)
+
+    if not validateMIParameters(config, isaInfoMap):
+        raise RuntimeError("MI parameter validation failed for K3")
+
+    solution = Solution(
+        config,
+        splitGSU=False,
+        printSolutionRejectionReason=True,
+        printIndexAssignmentInfo=False,
+        assembler=assembler,
+        isaInfoMap=isaInfoMap,
+    )
+    if not solution["Valid"]:
+        raise RuntimeError("K3 solution was rejected — see reason above")
+    return solution
+
+
 # ---------------------------------------------------------------------------
 # Generate assembly
 # ---------------------------------------------------------------------------

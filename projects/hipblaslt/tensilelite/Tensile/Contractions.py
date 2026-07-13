@@ -73,7 +73,7 @@ class ProblemType:
                  'useGradient', 'activationType', 'activationArgLength', 'activationComputeDataType', 'activationNoGuard',
                  'sparse', 'f32XdlMathOp', 'supportDeviceUserArguments', 'outputAmaxD', 'swizzleTensorA', 'swizzleTensorB', 'metadataLayout',
                  'mxBlockA', 'mxBlockB', 'mxTypeA', 'mxTypeB', 'mxScaleFormat',
-                 'usePartialRMS', 'partialRMSResidualAdd']
+                 'usePartialRMS', 'partialRMSResidualAdd', 'useRstdScale']
     @classmethod
     def FromOriginalState(cls, d):
         indices = [None]*d['TotalIndices']
@@ -248,6 +248,7 @@ class ProblemType:
 
         rv.usePartialRMS = bool(d.get('UsePartialRMS', False))
         rv.partialRMSResidualAdd = bool(d.get('PartialRMSResidualAdd', False))
+        rv.useRstdScale = bool(d.get('RstdScale', False))
 
         rv.useScaleAB = ""
         if 'UseScaleAB' in d:
@@ -654,6 +655,7 @@ class SizeMapping:
                  'useSubtileImpl',
                  'PartialRMS',
                  'PartialRMSResidualAdd',
+                 'RstdScale',
                  'NonTemporalD',
                  'WaveSeparateGlobalReadA',
                  'WaveSeparateGlobalReadB',
@@ -751,6 +753,7 @@ class SizeMapping:
                    useSubtileImpl           = bool(d.get('UseSubtileImpl', False)),
                    PartialRMS               = bool(d.get('PartialRMS', False)),
                    PartialRMSResidualAdd    = bool(d.get('PartialRMSResidualAdd', False)),
+                   RstdScale                = bool(d.get('RstdScale', False)),
                    NonTemporalD             = d['NonTemporalD'],
                    WaveSeparateGlobalReadA  = d['WaveSeparateGlobalReadA'],
                    WaveSeparateGlobalReadB  = d['WaveSeparateGlobalReadB'],

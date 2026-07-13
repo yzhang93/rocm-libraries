@@ -86,6 +86,7 @@ namespace TensileLite
             bool        m_partialRMSResidualAdd  = false;
             size_t      m_partialRMSMT0Override  = 0;
             size_t      m_partialRMSMT1Override  = 0;
+            bool        m_useRstdScale           = false;
 
             int                              m_sparse;
             KernelLanguage                   m_kernelLanguage;
