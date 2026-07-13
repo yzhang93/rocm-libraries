@@ -21,7 +21,7 @@
 
 GlobalParameters:
   MinimumRequiredVersion: 5.0.0
-  NumElementsToValidate: 128
+  NumElementsToValidate: -1
 
 BenchmarkProblems:
   -
