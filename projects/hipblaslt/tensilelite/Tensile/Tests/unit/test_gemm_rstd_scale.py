@@ -2,15 +2,16 @@
 # SPDX-License-Identifier: MIT
 """Pytest suite for the fused GEMM+RstdScale (K3) Subtile epilogue (gfx950, bf16).
 
-Exercises a comprehensive set of M shapes with fixed N_hidden=64, verifying:
+Exercises a comprehensive set of (M, N_hidden) shapes, verifying:
   - y output (bf16, tol=2e-2): (h2 @ W1.T) * rstd[:, None]
 
 The fixture is parametrized over wg_n (MIWaveGroup[1]):
-  wg_n=1: single-wave, N_out=64
-  wg_n=2: two-wave, N_out=128
+  wg_n=1: single-wave, MacroTile1=N_out=64
+  wg_n=2: two-wave, MacroTile1=N_out=128
 
-N_out is pinned to MacroTile1 = 64 * wg_n (row-containment invariant).
-N_hidden (GEMM2 contraction dim) is fixed to 64 for all shapes.
+N_out is pinned to MacroTile1 = 16 * 4 * wg_n (row-containment invariant).
+N_hidden (GEMM2 contraction dim, i.e. K) varies per shape; DepthU=64 is fixed
+in the solution so iters_per_tile = ceil(N_hidden / 64) changes per shape.
 """
 
 import math
@@ -42,32 +43,48 @@ requires_gfx950 = pytest.mark.skipif(
 # MIWaveGroup[1] values to exercise: single-wave and two-wave.
 _WG_N = [1, 2]
 
-# Shape list: (M, label). N_hidden is fixed to 64 for all shapes.
+# Shape list: (M, N_hidden, label).
+# N_hidden is the GEMM2 contraction dimension (K); DepthU=64 is fixed in the
+# solution so iters_per_tile = ceil(N_hidden/64). Varying N_hidden exercises
+# both the single-iteration path (N_hidden<=64) and multi-iteration paths.
 _SHAPES = [
-    # full-tile M (multiples of MT0=64).
-    (   64,  "M64"),
-    (  128,  "M128"),
-    (  256,  "M256"),
-    (  512,  "M512"),
-    ( 1024,  "M1024"),
-    ( 2048,  "M2048"),
+    # full-tile M, varying N_hidden.
+    (   64,    1,  "M64_K1"),
+    (   64,   32,  "M64_K32"),
+    (   64,   64,  "M64_K64"),
+    (   64,   96,  "M64_K96"),
+    (   64,  128,  "M64_K128"),
+    (   64,  256,  "M64_K256"),
+    (   64,  512,  "M64_K512"),
+    (   64, 1024,  "M64_K1024"),
+    (   64, 4096,  "M64_K4096"),
+    # larger full-tile M.
+    (  128,  128,  "M128_K128"),
+    (  256,   64,  "M256_K64"),
+    (  512,  512,  "M512_K512"),
+    ( 1024,  128,  "M1024_K128"),
+    ( 2048, 4096,  "M2048_K4096"),
     # edge-tile M (non-multiples of MT0=64).
-    (    1,  "M1"),
-    (   16,  "M16"),
-    (   32,  "M32"),
-    (   48,  "M48"),
-    (   63,  "M63"),
-    (   65,  "M65"),
-    (   80,  "M80"),
-    (  100,  "M100"),
-    (  130,  "M130"),
-    (  200,  "M200"),
-    (  513,  "M513"),
-    ( 1000,  "M1000"),
+    (    1,   64,  "M1_K64"),
+    (   16,   64,  "M16_K64"),
+    (   32,   64,  "M32_K64"),
+    (   48,   64,  "M48_K64"),
+    (   80,   96,  "M80_K96"),
+    (  100,  128,  "M100_K128"),
+    (  130,   37,  "M130_K37"),
+    (  200,   64,  "M200_K64"),
+    (  513,  256,  "M513_K256"),
+    ( 1000, 1024,  "M1000_K1024"),
+    # prime N_hidden — exercises non-DepthU-aligned loop tail.
+    (   64,   31,  "M64_K31"),
+    (   64,   97,  "M64_K97"),
+    (   64,  127,  "M64_K127"),
+    (  128,   61,  "M128_K61"),
+    ( 1024, 4093,  "M1024_K4093"),
 ]
 
-# N_hidden for GEMM2 contraction dim (fixed per solution).
-_N_HIDDEN = 64
+# MacroTile1 tile size (instN * MIWaveTile1 * wg_n = 16 * 4 * wg_n).
+_MT1_PER_WG_N = 64
 
 
 # ---------------------------------------------------------------------------
@@ -84,13 +101,15 @@ def k3_kernel(request):
         generate_asm,
     )
 
-    wg_n    = request.param
-    chip    = amdgpu_exec.get_chip()
-    N_out   = _N_HIDDEN * wg_n   # MacroTile1 = 64 * wg_n
+    wg_n  = request.param
+    chip  = amdgpu_exec.get_chip()
+    N_out = _MT1_PER_WG_N * wg_n   # MacroTile1 = 16*4*wg_n
 
     assembler, isaInfoMap, debugConfig = setup_tensile(chip)
+    # N_hidden passed here only satisfies the build_k3_solution signature;
+    # the assembly does not encode N_hidden — it is a runtime kernarg.
     solution = build_k3_solution(chip, assembler, isaInfoMap,
-                                 N_hidden=_N_HIDDEN, N_out=N_out, wg_n=wg_n)
+                                 N_hidden=_MT1_PER_WG_N, N_out=N_out, wg_n=wg_n)
     asm_str, kernel_name = generate_asm(solution, assembler, debugConfig)
     hsaco = amdgpu_exec.compile_asm_to_hsaco(asm_str, chip)
     return solution, kernel_name, hsaco, chip
@@ -193,12 +212,11 @@ def _run_shape(solution, kernel_name, hsaco, chip, M, N_hidden):
 # ---------------------------------------------------------------------------
 
 @requires_gfx950
-@pytest.mark.parametrize("M,label", _SHAPES, ids=[s[1] for s in _SHAPES])
-def test_k3_shape(k3_kernel, M, label):
+@pytest.mark.parametrize("M,N_hidden,label", _SHAPES, ids=[s[2] for s in _SHAPES])
+def test_k3_shape(k3_kernel, M, N_hidden, label):
     """Verify K3 (RstdScale) output y for shape M x N_out x N_hidden."""
     solution, kernel_name, hsaco, chip = k3_kernel
-    N_out    = solution["MacroTile1"]
-    N_hidden = _N_HIDDEN
+    N_out = solution["MacroTile1"]
 
     y_gpu_f32, y_ref_f32, M_actual = \
         _run_shape(solution, kernel_name, hsaco, chip, M, N_hidden)
