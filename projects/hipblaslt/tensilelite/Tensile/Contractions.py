@@ -72,7 +72,8 @@ class ProblemType:
                  'highPrecisionAccumulate', 'useInitialStridesAB', 'useInitialStridesCD', 'stridedBatched', 'groupedGemm',
                  'useGradient', 'activationType', 'activationArgLength', 'activationComputeDataType', 'activationNoGuard',
                  'sparse', 'f32XdlMathOp', 'supportDeviceUserArguments', 'outputAmaxD', 'swizzleTensorA', 'swizzleTensorB', 'metadataLayout',
-                 'mxBlockA', 'mxBlockB', 'mxTypeA', 'mxTypeB', 'mxScaleFormat']
+                 'mxBlockA', 'mxBlockB', 'mxTypeA', 'mxTypeB', 'mxScaleFormat',
+                 'usePartialRMS', 'partialRMSResidualAdd', 'useRstdScale']
     @classmethod
     def FromOriginalState(cls, d):
         indices = [None]*d['TotalIndices']
@@ -245,6 +246,10 @@ class ProblemType:
         if 'OutputAmaxD' in d:
             rv.outputAmaxD = d['OutputAmaxD']
 
+        rv.usePartialRMS = bool(d.get('UsePartialRMS', False))
+        rv.partialRMSResidualAdd = bool(d.get('PartialRMSResidualAdd', False))
+        rv.useRstdScale = bool(d.get('RstdScale', False))
+
         rv.useScaleAB = ""
         if 'UseScaleAB' in d:
             rv.useScaleAB = d['UseScaleAB']
@@ -416,6 +421,9 @@ class ProblemType:
             predicates.append(ProblemPredicate("MXBlockB", value=self.mxBlockB))
             if self.mxBlockB:
                 predicates.append(ProblemPredicate("DataTypeMXSB", value=self.mxTypeB))
+            predicates.append(ProblemPredicate("UsePartialRMS", value=self.usePartialRMS))
+            predicates.append(ProblemPredicate("UseRstdScale", value=self.useRstdScale))
+            predicates.append(ProblemPredicate("UsePartialRMSResidualAdd", value=self.partialRMSResidualAdd))
         return predicates
 
 def extractDimPredicate(cls, key, value, predicateName):
@@ -648,6 +656,9 @@ class SizeMapping:
                  'adaptiveGemmNTAB',
                  'customMainLoopScheduling',
                  'useSubtileImpl',
+                 'PartialRMS',
+                 'PartialRMSResidualAdd',
+                 'RstdScale',
                  'NonTemporalD',
                  'WaveSeparateGlobalReadA',
                  'WaveSeparateGlobalReadB',
@@ -743,6 +754,9 @@ class SizeMapping:
                    adaptiveGemmNTAB         = d['AdaptiveGemmNTAB'] if 'AdaptiveGemmNTAB' in d else 0,
                    customMainLoopScheduling = d['UseCustomMainLoopSchedule'],
                    useSubtileImpl           = bool(d.get('UseSubtileImpl', False)),
+                   PartialRMS               = bool(d.get('PartialRMS', False)),
+                   PartialRMSResidualAdd    = bool(d.get('PartialRMSResidualAdd', False)),
+                   RstdScale                = bool(d.get('RstdScale', False)),
                    NonTemporalD             = d['NonTemporalD'],
                    WaveSeparateGlobalReadA  = d['WaveSeparateGlobalReadA'],
                    WaveSeparateGlobalReadB  = d['WaveSeparateGlobalReadB'],
