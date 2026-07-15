@@ -1111,6 +1111,16 @@ namespace TensileLite
                                               (uint8_t*)inputs.ws + workspaceOffsetInByte);
             args.template append<const void*>("AmaxSync", inputs.Synchronizer);
         }
+
+        if(sizeMapping.partialRMS)
+        {
+            args.template append<void const*>("RMSNormGamma", inputs.rmsGamma);
+            args.template append<void*>      ("PartialBuf",   inputs.partialBuf);
+            if(sizeMapping.partialRMSResidualAdd)
+                args.template append<void const*>("ResidualBuf", inputs.residual);
+        }
+        if(sizeMapping.rstdScale)
+            args.template append<void const*>("RstdBuf", inputs.rstdBuf);
     }
 
     inline uint32_t getNumWorkGroups(const KernelInvocation& rv)

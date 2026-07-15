@@ -422,6 +422,9 @@ _defaultProblemType = {
     # in:f32, intermediate:xf32, out:f32. f32 = xf32(f32) * xf32(f32)
     "UseBeta": True,  # =True use beta parameter (asm will check for B=0 and optimize the write for that), =False don't use beta parameter
     "UseE": False,  # =True use output E to output gemm results before activation
+    "UsePartialRMS":         False,
+    "PartialRMSResidualAdd": False,
+    "RstdScale":             False,
     "Gradient": False,  # =True set globalWriteElements to gradient mode
     "UseBias": 0,  # =1 support bias vector on M direction, =2 support bias vector on N direction, =3 support bias vector on both M,N direction
     "BiasSrc": "D",  # This parameter is used in gradient + bias. Support A, B, D.
@@ -1326,6 +1329,12 @@ class ProblemType(Mapping):
         name.append(f"Aux{self['DataTypeE'].toChar()}")
     if self["OutputAmaxD"]:
       name.append("AmaxD")
+    if self["UsePartialRMS"]:
+      name.append("PRMS")
+      if self["PartialRMSResidualAdd"]:
+        name.append("RA")
+    if self["RstdScale"]:
+      name.append("Rstd")
     if self["Sparse"]:
       if self["Sparse"] == 2:
         name.append("SPBML%d"%(self["MetadataLayout"]))
