@@ -1835,8 +1835,58 @@ namespace
     /****************************************************************
  * Construct a Tensile Problem from a RocblasltContractionProblem *
  ****************************************************************/
-    auto ConstructTensileProblem(const RocblasltContractionProblem& prob)
+    // ---- Fused-RMSNorm (PartialRMS) row-major transpose -----------------------
+    // The current PartialRMS K1 emitter reduces the sum-of-squares over free0, so the
+    // GEMM must be arranged with free0 = N_hidden (the RMSNorm reduction axis). We
+    // achieve this by computing the transposed GEMM  D^T = op(B)^T * op(A)^T:
+    //   - swap m<->n and the A/B operands, flip both transposes (TN stays TN),
+    //   - make C/D contiguous with N_hidden as the leading (free0) dimension, which
+    //     lands the output as row-major [M, N_hidden] -- the layout Kernel 2 (row_div)
+    //     consumes and that hipBLASLt returns for the fused-RMSNorm epilogue.
+    static bool partialRMSNeedsTranspose(const RocblasltContractionProblem& p)
     {
+        RocblasltFusedEpilogueInfo fInfo;
+        return rocblaslt_resolve_fused_epilogue(p.fused_epilogue, fInfo) && fInfo.hasRMSNorm;
+    }
+
+    static hipblasOperation_t flipTransOp(hipblasOperation_t op)
+    {
+        return op == HIPBLAS_OP_N ? HIPBLAS_OP_T : HIPBLAS_OP_N;
+    }
+
+    static RocblasltContractionProblem transposeForPartialRMS(const RocblasltContractionProblem& p)
+    {
+        RocblasltContractionProblem t = p; // copy scalars, epilogue, workspace, gamma/eps ptr, etc.
+        t.trans_a = flipTransOp(p.trans_b);
+        t.trans_b = flipTransOp(p.trans_a);
+        t.m       = p.n; // free0 <- N_hidden
+        t.n       = p.m; // free1 <- M (tokens)
+
+        // A <- original B
+        t.a_type = p.b_type;   t.A = p.B;   t.batch_A = p.batch_B;
+        t.row_stride_a = p.row_stride_b; t.col_stride_a = p.col_stride_b;
+        t.batch_stride_a = p.batch_stride_b;
+        t.scaleA = p.scaleB; t.scaleAType = p.scaleBType; t.swizzleA = p.swizzleB;
+        // B <- original A
+        t.b_type = p.a_type;   t.B = p.A;   t.batch_B = p.batch_A;
+        t.row_stride_b = p.row_stride_a; t.col_stride_b = p.col_stride_a;
+        t.batch_stride_b = p.batch_stride_a;
+        t.scaleB = p.scaleA; t.scaleBType = p.scaleAType; t.swizzleB = p.swizzleA;
+
+        // C/D become [N_hidden, M] contiguous col-major (ld = N_hidden) == row-major [M, N_hidden].
+        t.row_stride_c = 1; t.col_stride_c = p.n;
+        t.row_stride_d = 1; t.col_stride_d = p.n;
+        return t;
+    }
+
+    auto ConstructTensileProblem(const RocblasltContractionProblem& probIn)
+    {
+        // Fused RMSNorm: transpose so free0 = N_hidden (see transposeForPartialRMS).
+        const bool _prmsSwap = partialRMSNeedsTranspose(probIn);
+        RocblasltContractionProblem probStorage
+            = _prmsSwap ? transposeForPartialRMS(probIn) : probIn;
+        const RocblasltContractionProblem& prob = probStorage;
+
         auto a_type       = hipDataType_to_tensile_type(prob.a_type);
         auto b_type       = hipDataType_to_tensile_type(prob.b_type);
         auto c_type       = hipDataType_to_tensile_type(prob.c_type);
@@ -2155,9 +2205,15 @@ namespace
         return tensileProblem;
     }
 
-    void updateTensileProblem(const RocblasltContractionProblem&   prob,
+    void updateTensileProblem(const RocblasltContractionProblem&   probIn,
                               TensileLite::ContractionProblemGemm& tensileProblem)
     {
+        // Fused RMSNorm: transpose so free0 = N_hidden (see transposeForPartialRMS).
+        const bool _prmsSwap = partialRMSNeedsTranspose(probIn);
+        RocblasltContractionProblem probStorage
+            = _prmsSwap ? transposeForPartialRMS(probIn) : probIn;
+        const RocblasltContractionProblem& prob = probStorage;
+
         auto a_type       = hipDataType_to_tensile_type(prob.a_type);
         auto b_type       = hipDataType_to_tensile_type(prob.b_type);
         auto c_type       = hipDataType_to_tensile_type(prob.c_type);
@@ -2483,8 +2539,15 @@ namespace
     /***************************************************************
  * Construct the inputs to a Tensile ContractionProblemGemm        *
  ***************************************************************/
-    auto GetTensileInputs(const RocblasltContractionProblem& prob)
+    auto GetTensileInputs(const RocblasltContractionProblem& probIn)
     {
+        // Fused RMSNorm: swap A/B pointers to match the transposed problem so the
+        // kernel receives operands consistent with free0 = N_hidden.
+        const bool _prmsSwap = partialRMSNeedsTranspose(probIn);
+        RocblasltContractionProblem probStorage
+            = _prmsSwap ? transposeForPartialRMS(probIn) : probIn;
+        const RocblasltContractionProblem& prob = probStorage;
+
         auto compute_type = roc2TensileType(prob.compute_type, false);
 
         // Structure describing the inputs (A, B, C, D, alpha, beta)
@@ -3363,7 +3426,7 @@ namespace
             archName = archName.substr(0, colonPos);
 
         auto relpath = std::filesystem::path(archName)
-                       / ("partial_rms_epilogue_" + archName + ".co");
+                       / ("row_div_" + archName + ".co");
         return rocblaslt_find_library_relative_path(relpath);
     }
 
@@ -3410,39 +3473,43 @@ namespace
         return *adapters.at(deviceId);
     }
 
-    // Launch partial_rms_epilogue on `stream` after K1 has completed (same stream => ordered).
-    // Kernarg layout matches PartialRmsEpilogueGenerator: ptrC(D), ptrD(partialBuf), M, N,
-    // nD(=nTilesN), invD(=1/N), eps. block=(256,1,1), grid=(ceil(M/256), ceil(N/256), 1).
-    hipError_t launchPartialRmsEpilogue(void*       D,
-                                        void*       partialBuf,
-                                        uint32_t    M,
-                                        uint32_t    N,
-                                        uint32_t    nTilesN,
-                                        float       eps,
-                                        hipStream_t stream)
+    // Launch row_div (Kernel 2) on `stream` after K1 has completed (same stream => ordered).
+    // Row-major convention: D is row-major [tokens M, N_hidden] (N_hidden contiguous),
+    // partialBuf is [mPad, nD] with one fp32 partial Sum-of-squares per (token, N_hidden tile).
+    // row_div reduces partialBuf across the nD tiles per token and divides D in place by
+    // sqrt(inv_d * Sigma + eps). Kernarg layout matches buildRowDivArgs:
+    //   0 D, 8 partialBuf, 16 pad(i32=0), 20 n(=N_hidden), 24 n_c(=RD_BLOCK), 28 n_d(=nD),
+    //   32 inv_d(=1/N_hidden), 36 eps. grid=(M, N_hidden/RD_BLOCK, 1), block=(64,1,1).
+    hipError_t launchRowDiv(void*       D,
+                            void*       partialBuf,
+                            uint32_t    tokensM,
+                            uint32_t    nHidden,
+                            uint32_t    nD,
+                            float       eps,
+                            hipStream_t stream)
     {
-        const float invD = N ? (1.0f / static_cast<float>(N)) : 0.0f;
+        constexpr uint32_t RD_BLOCK = 128; // N_hidden columns processed per row_div block
+        constexpr uint32_t block    = 64;
+        const float        invD     = nHidden ? (1.0f / static_cast<float>(nHidden)) : 0.0f;
+        const uint32_t     nSplit   = (nHidden + RD_BLOCK - 1) / RD_BLOCK;
 
         TensileLite::KernelArguments kArgs(false);
-        kArgs.appendAligned("ptrC", D);
-        kArgs.appendAligned("ptrD", partialBuf);
-        kArgs.appendAligned("M", M);
-        kArgs.appendAligned("N", N);
-        kArgs.appendAligned("nD", nTilesN);
-        kArgs.appendAligned("invD", invD);
+        kArgs.appendAligned("D", D);
+        kArgs.appendAligned("partialBuf", partialBuf);
+        kArgs.appendAligned("pad", static_cast<uint32_t>(0));
+        kArgs.appendAligned("n", nHidden);
+        kArgs.appendAligned("n_c", RD_BLOCK);
+        kArgs.appendAligned("n_d", nD);
+        kArgs.appendAligned("inv_d", invD);
         kArgs.appendAligned("eps", eps);
 
-        constexpr uint32_t block = 256;
-        const uint32_t     gridX = (M + block - 1) / block;
-        const uint32_t     gridY = (N + block - 1) / block;
-
-        TensileLite::KernelInvocation invocation{"partial_rms_epilogue",
+        TensileLite::KernelInvocation invocation{"row_div",
                                                  partialRmsCodeObjectFileName(),
                                                  false,
                                                  {1, 1, 1},
                                                  {block, 1, 1},
-                                                 {gridX, gridY, 1},
-                                                 {gridX * block, gridY, 1},
+                                                 {tokensM, nSplit, 1},
+                                                 {tokensM * block, nSplit, 1},
                                                  0,
                                                  kArgs};
         return partialRmsAdapter().launchKernel(invocation, stream, nullptr, nullptr);
@@ -3634,11 +3701,11 @@ rocblaslt_status runContractionProblem(rocblaslt_handle                   handle
             float    partialRmsEps     = 0.f;
             if(solution->sizeMapping.partialRMS)
             {
-                // Kernel 2 column addressing uses signed 32-bit (col * M * 2); enforce the limit.
-                if(prob.m > 32767)
+                // row_div (Kernel 2) processes N_hidden in RD_BLOCK(=128)-column strips.
+                if(prob.n % 128 != 0)
                 {
                     log_error(__func__,
-                              "fused RMSNorm partial_rms_epilogue requires M <= 32767");
+                              "fused RMSNorm row_div requires N_hidden to be a multiple of 128");
                     return rocblaslt_status_not_implemented;
                 }
                 const size_t pbBytes = solution->partialRMSPartialBufBytes(data->problem);
@@ -3646,8 +3713,10 @@ rocblaslt_status runContractionProblem(rocblaslt_handle                   handle
                 if(pbBytes && prob.workspace && total >= pbBytes)
                     partialRmsBuf = static_cast<uint8_t*>(prob.workspace) + (total - pbBytes);
 
-                const size_t mt1  = solution->sizeMapping.macroTile.y;
-                partialRmsNTilesN = mt1 ? static_cast<uint32_t>((prob.n + mt1 - 1) / mt1) : 0;
+                // partialBuf has nD = ceil(N_hidden / MT0) tiles per token (K1 reduces free0 =
+                // N_hidden, tiled by MacroTile0). prob.n is N_hidden in the caller-facing problem.
+                const size_t mt0  = solution->sizeMapping.macroTile.x;
+                partialRmsNTilesN = mt0 ? static_cast<uint32_t>((prob.n + mt0 - 1) / mt0) : 0;
 
                 RocblasltFusedEpilogueInfo fInfo;
                 if(rocblaslt_resolve_fused_epilogue(prob.fused_epilogue, fInfo))
@@ -3699,13 +3768,13 @@ rocblaslt_status runContractionProblem(rocblaslt_handle                   handle
                && partialRmsBuf != nullptr)
             {
                 status = hip2RocStatus(
-                    launchPartialRmsEpilogue(reinterpret_cast<void*>(prob.D),
-                                             partialRmsBuf,
-                                             static_cast<uint32_t>(prob.m),
-                                             static_cast<uint32_t>(prob.n),
-                                             partialRmsNTilesN,
-                                             partialRmsEps,
-                                             prob.stream));
+                    launchRowDiv(reinterpret_cast<void*>(prob.D),
+                                 partialRmsBuf,
+                                 static_cast<uint32_t>(prob.m), // tokens
+                                 static_cast<uint32_t>(prob.n), // N_hidden
+                                 partialRmsNTilesN,             // nD
+                                 partialRmsEps,
+                                 prob.stream));
             }
 
             if(rocblaslt::Debug::Instance().printLogAsMarker())

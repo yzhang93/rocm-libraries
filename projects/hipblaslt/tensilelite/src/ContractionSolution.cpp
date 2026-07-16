@@ -3648,13 +3648,17 @@ namespace TensileLite
         if(mt0 == 0 || mt1 == 0)
             return 0;
 
-        const size_t M     = problem.d().sizes()[0];
-        const size_t N     = problem.d().sizes()[1];
-        const size_t batch = problem.d().sizes()[2];
+        // Row-major PartialRMS convention: the problem is transposed so free0 = N_hidden
+        // and free1 = M (tokens). K1 writes partialBuf[token, tile] with one fp32 per
+        // (token, free0 macro-tile): rows = padded tokens (by MT1), cols = nD tiles along
+        // N_hidden (by MT0).
+        const size_t nHidden = problem.d().sizes()[0]; // free0 = N_hidden
+        const size_t tokens  = problem.d().sizes()[1]; // free1 = M tokens
+        const size_t batch   = problem.d().sizes()[2];
 
-        const size_t mPadded = ((M + mt0 - 1) / mt0) * mt0; // K1 writes padded rows
-        const size_t nTilesN = (N + mt1 - 1) / mt1;         // one partial per N macro-tile
-        return mPadded * nTilesN * batch * sizeof(float);
+        const size_t nD       = (nHidden + mt0 - 1) / mt0;      // partial tiles along N_hidden
+        const size_t mPadded  = ((tokens + mt1 - 1) / mt1) * mt1; // K1 writes padded token rows
+        return mPadded * nD * batch * sizeof(float);
     }
 
     size_t ContractionSolution::requiredWorkspaceSizeGsu(Problem const&  problem,

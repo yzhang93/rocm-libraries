@@ -762,7 +762,10 @@ TEST(FusedEpilogueE2E, fullRmsNormMatchesReference)
         for(int64_t n = 0; n < N; ++n)
         {
             const float ref = h1[n] * invRms * gammaF[n];
-            const float got = bf16_to_f32(hD[n * M + m]); // D col-major
+            // Fused RMSNorm returns D row-major [M, N_hidden] (N_hidden contiguous):
+            // the PartialRMS K1 emitter reduces free0 = N_hidden, so the host transposes
+            // the GEMM (free0 = N_hidden) which lands D as row-major.
+            const float got = bf16_to_f32(hD[m * N + n]); // D row-major [M, N]
             const float denom = std::max(std::abs(ref), 1e-3f);
             const double rel   = std::abs(got - ref) / denom;
             maxRelErr          = std::max(maxRelErr, static_cast<double>(rel));
@@ -818,10 +821,6 @@ TEST(FusedEpilogueE2E, fullRmsNormResidualAddMatchesReference)
     // stays skipped. Re-enable once the residualAdd partialBuf correctness issue (kernel
     // SubtilePartialRMSEmit residual path vs the client/CPU reference) is resolved. The body
     // below is complete and validates residual-add end to end once the solution ships.
-    GTEST_SKIP() << "residual-add PartialRMS K1 solution not shipped: residualAdd=True kernel "
-                    "fails partialBuf validation (device sum-of-squares ~6.24x reference); "
-                    "provision via epilogues/scripts/build_library.sh once fixed";
-
     if(!deviceIsGfx950())
         GTEST_SKIP() << "fused RMSNorm (PartialRMS) is wired for gfx950 only";
 
@@ -969,7 +968,7 @@ TEST(FusedEpilogueE2E, fullRmsNormResidualAddMatchesReference)
             for(int64_t kk = 0; kk < K; ++kk)
                 acc += bf16_to_f32(hA[kk + m * K]) * bf16_to_f32(hB[kk + n * K]);
             acc *= alpha;
-            acc += bf16_to_f32(hResidual[m + n * M]); // residual col-major [M, N] (like D)
+            acc += bf16_to_f32(hResidual[m * N + n]); // residual row-major [M, N] (like D)
             h1[n] = acc;
             sumSq += acc * acc;
         }
@@ -977,7 +976,7 @@ TEST(FusedEpilogueE2E, fullRmsNormResidualAddMatchesReference)
         for(int64_t n = 0; n < N; ++n)
         {
             const float  ref   = h1[n] * invRms * gammaF[n];
-            const float  got   = bf16_to_f32(hD[n * M + m]); // D col-major
+            const float  got   = bf16_to_f32(hD[m * N + n]); // D row-major [M, N]
             const float  denom = std::max(std::abs(ref), 1e-3f);
             const double rel   = std::abs(got - ref) / denom;
             maxRelErr          = std::max(maxRelErr, static_cast<double>(rel));
