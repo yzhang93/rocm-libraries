@@ -780,3 +780,37 @@ def build_partial_rms_epilogue(chip: str, M: int = 0, N: int = 0, K: int = 0) ->
         _meta_str((meta,)),
     ])
     return kStr, funcName
+
+
+def main():
+    """CLI to emit the partial_rms_epilogue assembly to a file.
+
+    Mirrors the -o/--arch/--toolchain/--xnack interface of the ExtOp generators
+    (LayerNormGenerator/SoftmaxGenerator/AMaxGenerator) so the device-library
+    CMake can generate + assemble it the same way. The kernel is M-agnostic at
+    runtime (M is a kernarg), so no problem size is baked in here.
+
+    Run as a module from the tensilelite root so the package imports resolve, e.g.
+        python -m epilogues.tensilelite.partial_rms_epilogue_generator -o out.s --arch gfx950
+    """
+    import argparse
+
+    parser = argparse.ArgumentParser(
+        description="Generate partial_rms_epilogue (fused RMSNorm reduce-and-apply) assembly.")
+    parser.add_argument("-o", "--output", required=True, help="Output assembly (.s) path.")
+    parser.add_argument("--arch", required=True, help="GPU architecture, e.g. gfx950.")
+    # Accepted for CLI parity with the ExtOp generators; assembly is compiled by CMake.
+    parser.add_argument("--toolchain", default=None, help="C++ compiler path (unused here).")
+    # xnack is folded into the chip string; build_partial_rms_epilogue keys off ":xnack+".
+    parser.add_argument("--xnack", action="store_true",
+                        help="Target the xnack+ variant of the architecture.")
+    args = parser.parse_args()
+
+    chip = args.arch + (":xnack+" if args.xnack else "")
+    asmStr, _ = build_partial_rms_epilogue(chip)
+    with open(args.output, "w") as f:
+        f.write(asmStr)
+
+
+if __name__ == "__main__":
+    main()

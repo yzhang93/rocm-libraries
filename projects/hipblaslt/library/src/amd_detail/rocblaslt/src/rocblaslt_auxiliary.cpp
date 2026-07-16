@@ -521,6 +521,12 @@ RocblasltContractionProblem construct_rocblaslt_problem(rocblaslt_handle        
         problem.alpha = alphaTmp;
     }
 
+    // Forward any composable fused-epilogue chain so the heuristic/solution-selection path
+    // (ConstructTensileProblem -> setUsePartialRMS) routes fused-RMSNorm problems to the
+    // PartialRMS solution. Without this, hipblasLtMatmulAlgoGetHeuristic would select a normal
+    // GEMM solution and the fused epilogue would be silently dropped. Non-owning pointer.
+    problem.fused_epilogue = matmul_descr->fused_epilogue;
+
     return problem;
 }
 

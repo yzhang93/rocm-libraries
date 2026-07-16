@@ -44,3 +44,5 @@ endif()
 if(HIPBLASLT_ENABLE_MATRIX_TRANSFORM)
     add_subdirectory(matrix-transform)
 endif()
+# Fused-RMSNorm reduce-and-apply (Kernel 2) companion to the TensileLite PartialRMS GEMM.
+add_subdirectory(partial-rms)
