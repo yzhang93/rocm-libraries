@@ -2183,6 +2183,10 @@ namespace
                 tensileProblem.setUsePartialRMS(true);
                 tensileProblem.setPartialRMSResidualAdd(fusedInfo.hasResidualAdd);
             }
+            // Decomposed consumer (Kernel 3 RstdScale): applies a per-row rstd to GEMM2's
+            // output. Normal orientation (per-M-row scale, no reduction) -> no transpose.
+            if(fusedInfo.hasRMSNormScaleApply)
+                tensileProblem.setUseRstdScale(true);
         }
 
         // set AmaxD
@@ -2456,11 +2460,15 @@ namespace
         // every call). Without this, selection would route the fused problem to a normal solution.
         {
             RocblasltFusedEpilogueInfo fusedInfo;
-            if(rocblaslt_resolve_fused_epilogue(prob.fused_epilogue, fusedInfo)
-               && fusedInfo.hasRMSNorm)
+            if(rocblaslt_resolve_fused_epilogue(prob.fused_epilogue, fusedInfo))
             {
-                tensileProblem.setUsePartialRMS(true);
-                tensileProblem.setPartialRMSResidualAdd(fusedInfo.hasResidualAdd);
+                if(fusedInfo.hasRMSNorm)
+                {
+                    tensileProblem.setUsePartialRMS(true);
+                    tensileProblem.setPartialRMSResidualAdd(fusedInfo.hasResidualAdd);
+                }
+                if(fusedInfo.hasRMSNormScaleApply)
+                    tensileProblem.setUseRstdScale(true);
             }
         }
 
@@ -2582,6 +2590,9 @@ namespace
         {
             inputs.rmsGamma = fusedInputs.rmsnormGamma;
             inputs.residual = fusedInputs.residual;
+            // Decomposed consumer (Kernel 3 RstdScale): per-row rstd from the handoff descriptor.
+            if(fusedInputs.hasRMSNormScaleApply)
+                inputs.rstdBuf = fusedInputs.perRowScale;
         }
 
         // set bias vector

@@ -505,6 +505,24 @@ extern "C++" bool rocblaslt_resolve_fused_epilogue(const hipblasLtFusedEpilogueD
     out.rmsnormEps     = desc->rmsnorm_eps;
     out.residual       = desc->residual;
     out.residualOutput = desc->residual_output;
+    if(desc->rmsnorm_stats != nullptr)
+    {
+        out.perRowScale       = desc->rmsnorm_stats->per_row_scale;
+        out.rmsStatsPopulated = desc->rmsnorm_stats->populated;
+    }
+    return true;
+}
+
+// Test-only: inject a caller-provided device rstd buffer into the decomposed handoff so the
+// consumer (Kernel 3 RstdScale) path can be exercised end-to-end before the producer
+// reduce-and-return kernel is implemented. Not part of the public API.
+extern "C++" HIPBLASLT_EXPORT bool rocblaslt_rmsnorm_handoff_set_scale_for_testing(
+    hipblasLtFusedEpilogueRMSNormDescriptor* desc, void* per_row_scale)
+{
+    if(desc == nullptr)
+        return false;
+    desc->per_row_scale = per_row_scale;
+    desc->populated     = (per_row_scale != nullptr);
     return true;
 }
 
@@ -913,12 +931,12 @@ try
     rocblaslt::Debug::Instance().markerStart("hipblasLtMatmul");
     hipblasStatus_t return_status = HIPBLAS_STATUS_SUCCESS;
 
-    // Fused-epilogue guard. The full RMSNorm flow (single-call producer K1 + reduce-and-apply
-    // Kernel 2) is wired for gfx950: it maps to the TensileLite PartialRMS solution and launches
-    // partial_rms_epilogue. Problems on other arches simply find no PartialRMS solution and fail
-    // at selection. The decomposed producer/consumer stages
-    // (PARTIAL_RMSNORM_STATS / RMSNORM_SCALE_APPLY) and other reserved components have no kernels
-    // yet, so keep rejecting them here with NOT_SUPPORTED before kernel selection/launch.
+    // Fused-epilogue guard. Wired for gfx950:
+    //   - full RMSNorm (single-call producer K1 + reduce-and-apply Kernel 2), and
+    //   - the decomposed consumer (RMSNORM_SCALE_APPLY / Kernel 3 RstdScale), which applies a
+    //     per-row rstd carried in the handoff descriptor to GEMM2's output.
+    // The decomposed producer (PARTIAL_RMSNORM_STATS) still has no reduce-and-return kernel, so
+    // keep rejecting it (and any other unsupported fused chain) with NOT_SUPPORTED before launch.
     if(auto* desc = (rocblaslt_matmul_desc)matmul_descr)
     {
         if(desc->fused_epilogue != nullptr)
@@ -926,12 +944,11 @@ try
             const auto* fused = desc->fused_epilogue;
             const bool  fullRmsNorm
                 = fused_epilogue_has_stage(fused, HIPBLASLT_FUSEABLE_EPILOGUE_RMSNORM);
-            const bool decomposed
-                = fused_epilogue_has_stage(fused,
-                                           HIPBLASLT_FUSEABLE_EPILOGUE_PARTIAL_RMSNORM_STATS)
-                  || fused_epilogue_has_stage(fused,
-                                              HIPBLASLT_FUSEABLE_EPILOGUE_RMSNORM_SCALE_APPLY);
-            if(!fullRmsNorm || decomposed)
+            const bool scaleApply
+                = fused_epilogue_has_stage(fused, HIPBLASLT_FUSEABLE_EPILOGUE_RMSNORM_SCALE_APPLY);
+            const bool partialStats
+                = fused_epilogue_has_stage(fused, HIPBLASLT_FUSEABLE_EPILOGUE_PARTIAL_RMSNORM_STATS);
+            if(partialStats || (!fullRmsNorm && !scaleApply))
             {
                 rocblaslt::Debug::Instance().markerStop();
                 return HIPBLAS_STATUS_NOT_SUPPORTED;

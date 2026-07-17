@@ -1002,3 +1002,149 @@ TEST(FusedEpilogueE2E, fullRmsNormResidualAddMatchesReference)
     hipFree(dResidual);
     hipFree(dWs);
 }
+
+// ---- End-to-end numeric test: decomposed RMSNorm consumer (Kernel 3 RstdScale) ----
+//
+// Exercises the decomposed flow's consumer stage in isolation: a GEMM2 with the
+// HIPBLASLT_FUSEABLE_EPILOGUE_RMSNORM_SCALE_APPLY epilogue multiplies each output row by a
+// pre-computed per-row rstd carried in the handoff descriptor (K3 RstdScale, normal
+// orientation, no reduction). The decomposed producer reduce-and-return kernel is not yet
+// implemented, so the test injects a host-computed rstd into the opaque handoff via a
+// test-only hook. Verifies D[m,n] = (alpha * op(A)*op(B))[m,n] * rstd[m]. gfx950-only.
+
+// Test-only hook (defined in amd_detail/hipblaslt.cpp) to populate the opaque RMSNorm handoff
+// descriptor with a caller-provided device rstd buffer before the producer kernel exists.
+extern "C++" bool rocblaslt_rmsnorm_handoff_set_scale_for_testing(
+    hipblasLtFusedEpilogueRMSNormDescriptor_t desc, void* per_row_scale);
+
+TEST(FusedEpilogueE2E, decomposedScaleApplyMatchesReference)
+{
+    if(!deviceIsGfx950())
+        GTEST_SKIP() << "fused RMSNorm (RstdScale) is wired for gfx950 only";
+
+    // TN, bf16, col-major. K3 RstdScale library tiles are N_out=64 wide; K = N_hidden.
+    const int64_t M = 256, N = 64, K = 64;
+    const float   alpha = 1.0f, beta = 0.0f;
+
+    std::vector<uint16_t> hA(static_cast<size_t>(K) * M);
+    std::vector<uint16_t> hB(static_cast<size_t>(K) * N);
+    std::vector<uint16_t> hD(static_cast<size_t>(M) * N, 0);
+    std::vector<float>    hRstd(static_cast<size_t>(M));
+
+    std::mt19937                          rng(321);
+    std::uniform_real_distribution<float> dist(-0.1f, 0.1f);
+    std::uniform_real_distribution<float> rdist(0.25f, 1.75f);
+    for(auto& x : hA)
+        x = f32_to_bf16(dist(rng));
+    for(auto& x : hB)
+        x = f32_to_bf16(dist(rng));
+    for(auto& r : hRstd)
+        r = rdist(rng); // arbitrary per-row scale standing in for the producer's rstd
+
+    void *dA = nullptr, *dB = nullptr, *dC = nullptr, *dD = nullptr, *dRstd = nullptr,
+         *dWs                = nullptr;
+    const size_t wsSize      = size_t(64) * 1024 * 1024;
+    ASSERT_EQ(hipMalloc(&dA, hA.size() * sizeof(uint16_t)), hipSuccess);
+    ASSERT_EQ(hipMalloc(&dB, hB.size() * sizeof(uint16_t)), hipSuccess);
+    ASSERT_EQ(hipMalloc(&dD, hD.size() * sizeof(uint16_t)), hipSuccess);
+    ASSERT_EQ(hipMalloc(&dRstd, hRstd.size() * sizeof(float)), hipSuccess);
+    ASSERT_EQ(hipMalloc(&dWs, wsSize), hipSuccess);
+    dC = dD;
+    ASSERT_EQ(hipMemcpy(dA, hA.data(), hA.size() * sizeof(uint16_t), hipMemcpyHostToDevice),
+              hipSuccess);
+    ASSERT_EQ(hipMemcpy(dB, hB.data(), hB.size() * sizeof(uint16_t), hipMemcpyHostToDevice),
+              hipSuccess);
+    ASSERT_EQ(hipMemcpy(dRstd, hRstd.data(), hRstd.size() * sizeof(float), hipMemcpyHostToDevice),
+              hipSuccess);
+    ASSERT_EQ(hipMemset(dD, 0, hD.size() * sizeof(uint16_t)), hipSuccess);
+
+    hipblasLtHandle_t handle = nullptr;
+    ASSERT_EQ(hipblasLtCreate(&handle), HIPBLAS_STATUS_SUCCESS);
+
+    hipblasLtMatrixLayout_t layA = nullptr, layB = nullptr, layC = nullptr, layD = nullptr;
+    ASSERT_EQ(hipblasLtMatrixLayoutCreate(&layA, HIP_R_16BF, K, M, K), HIPBLAS_STATUS_SUCCESS);
+    ASSERT_EQ(hipblasLtMatrixLayoutCreate(&layB, HIP_R_16BF, K, N, K), HIPBLAS_STATUS_SUCCESS);
+    ASSERT_EQ(hipblasLtMatrixLayoutCreate(&layC, HIP_R_16BF, M, N, M), HIPBLAS_STATUS_SUCCESS);
+    ASSERT_EQ(hipblasLtMatrixLayoutCreate(&layD, HIP_R_16BF, M, N, M), HIPBLAS_STATUS_SUCCESS);
+
+    hipblasLtMatmulDesc_t mm = nullptr;
+    ASSERT_EQ(hipblasLtMatmulDescCreate(&mm, HIPBLAS_COMPUTE_32F, HIP_R_32F),
+              HIPBLAS_STATUS_SUCCESS);
+    const hipblasOperation_t opT = HIPBLAS_OP_T, opN = HIPBLAS_OP_N;
+    ASSERT_EQ(hipblasLtMatmulDescSetAttribute(mm, HIPBLASLT_MATMUL_DESC_TRANSA, &opT, sizeof(opT)),
+              HIPBLAS_STATUS_SUCCESS);
+    ASSERT_EQ(hipblasLtMatmulDescSetAttribute(mm, HIPBLASLT_MATMUL_DESC_TRANSB, &opN, sizeof(opN)),
+              HIPBLAS_STATUS_SUCCESS);
+
+    // Decomposed handoff, populated with the host rstd via the test-only hook.
+    hipblasLtFusedEpilogueRMSNormDescriptor_t stats = nullptr;
+    ASSERT_EQ(hipblasLtFusedEpilogueRMSNormDescriptorCreate(&stats), HIPBLAS_STATUS_SUCCESS);
+    ASSERT_TRUE(rocblaslt_rmsnorm_handoff_set_scale_for_testing(stats, dRstd));
+
+    // Consumer chain: RMSNorm scale-apply reads the deferred per-row scale from the handoff.
+    hipblasLtFusedEpilogueDescriptor_t cons = nullptr;
+    ASSERT_EQ(hipblasLtFusedEpilogueCreate(&cons), HIPBLAS_STATUS_SUCCESS);
+    ASSERT_EQ(hipblasLtFusedEpilogueAdd(cons, HIPBLASLT_FUSEABLE_EPILOGUE_RMSNORM_SCALE_APPLY),
+              HIPBLAS_STATUS_SUCCESS);
+    ASSERT_EQ(hipblasLtFusedEpilogueSetAttribute(
+                  cons, HIPBLASLT_FUSED_EPILOGUE_RMSNORM_STATS, &stats, sizeof(stats)),
+              HIPBLAS_STATUS_SUCCESS);
+    ASSERT_EQ(hipblasLtMatmulDescSetAttribute(
+                  mm, HIPBLASLT_MATMUL_DESC_FUSED_EPILOGUE, &cons, sizeof(cons)),
+              HIPBLAS_STATUS_SUCCESS);
+
+    hipblasLtMatmulPreference_t pref = nullptr;
+    ASSERT_EQ(hipblasLtMatmulPreferenceCreate(&pref), HIPBLAS_STATUS_SUCCESS);
+    ASSERT_EQ(hipblasLtMatmulPreferenceSetAttribute(
+                  pref, HIPBLASLT_MATMUL_PREF_MAX_WORKSPACE_BYTES, &wsSize, sizeof(wsSize)),
+              HIPBLAS_STATUS_SUCCESS);
+
+    hipblasLtMatmulHeuristicResult_t heur[1];
+    int                              algoCount = 0;
+    ASSERT_EQ(hipblasLtMatmulAlgoGetHeuristic(
+                  handle, mm, layA, layB, layC, layD, pref, 1, heur, &algoCount),
+              HIPBLAS_STATUS_SUCCESS);
+    ASSERT_GT(algoCount, 0) << "no RstdScale (K3) solution selected for the scale-apply problem";
+
+    ASSERT_EQ(hipblasLtMatmul(handle, mm, &alpha, dA, layA, dB, layB, &beta, dC, layC, dD, layD,
+                              &heur[0].algo, dWs, wsSize, nullptr),
+              HIPBLAS_STATUS_SUCCESS);
+    ASSERT_EQ(hipDeviceSynchronize(), hipSuccess);
+    ASSERT_EQ(hipMemcpy(hD.data(), dD, hD.size() * sizeof(uint16_t), hipMemcpyDeviceToHost),
+              hipSuccess);
+
+    // Reference: D[m,n] = (alpha * sum_k A[k,m]*B[k,n]) * rstd[m]. K3 keeps the normal
+    // orientation (per-M-row scale, no reduction), so D is col-major [M, N].
+    size_t mismatches = 0;
+    double maxRelErr  = 0.0;
+    for(int64_t m = 0; m < M; ++m)
+        for(int64_t n = 0; n < N; ++n)
+        {
+            float acc = 0.0f;
+            for(int64_t kk = 0; kk < K; ++kk)
+                acc += bf16_to_f32(hA[kk + m * K]) * bf16_to_f32(hB[kk + n * K]);
+            const float  ref   = acc * alpha * hRstd[m];
+            const float  got   = bf16_to_f32(hD[n * M + m]); // D col-major [M, N]
+            const float  denom = std::max(std::abs(ref), 1e-3f);
+            const double rel   = std::abs(got - ref) / denom;
+            maxRelErr          = std::max(maxRelErr, static_cast<double>(rel));
+            if(rel > 5e-2)
+                ++mismatches;
+        }
+    EXPECT_EQ(mismatches, 0u) << "max relative error " << maxRelErr;
+
+    hipblasLtMatmulPreferenceDestroy(pref);
+    hipblasLtFusedEpilogueDestroy(cons);
+    hipblasLtFusedEpilogueRMSNormDescriptorDestroy(stats);
+    hipblasLtMatmulDescDestroy(mm);
+    hipblasLtMatrixLayoutDestroy(layA);
+    hipblasLtMatrixLayoutDestroy(layB);
+    hipblasLtMatrixLayoutDestroy(layC);
+    hipblasLtMatrixLayoutDestroy(layD);
+    hipblasLtDestroy(handle);
+    hipFree(dA);
+    hipFree(dB);
+    hipFree(dD);
+    hipFree(dRstd);
+    hipFree(dWs);
+}

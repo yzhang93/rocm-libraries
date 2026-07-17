@@ -690,6 +690,10 @@ struct RocblasltFusedEpilogueInfo
     float       rmsnormEps           = 0.f;
     const void* residual             = nullptr;
     const void* residualOutput       = nullptr;
+    // Decomposed flow: the per-row rstd carried in the handoff descriptor. The producer
+    // (partial stats) reduction writes it; the consumer (RMSNorm scale-apply / K3) reads it.
+    const void* perRowScale          = nullptr;
+    bool        rmsStatsPopulated    = false;
 };
 
 // Resolve an opaque fused-epilogue handle into the POD above. Returns false when desc is
