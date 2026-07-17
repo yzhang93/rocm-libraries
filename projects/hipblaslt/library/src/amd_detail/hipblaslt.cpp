@@ -386,6 +386,9 @@ struct hipblasLtFusedEpilogueRMSNormDescriptor
     void* per_row_scale = nullptr;
     // Set after the producer reduction has populated per_row_scale.
     bool populated = false;
+    // True when the library allocated per_row_scale (producer path) and must free it on destroy.
+    // False when a caller/test provided the buffer via the test-only hook.
+    bool owns_scale = false;
 };
 
 // Definition of the opaque handle declared in hipblaslt.h. Owns the composed list of
@@ -689,6 +692,8 @@ hipblasStatus_t
     hipblasLtFusedEpilogueRMSNormDescriptorDestroy(hipblasLtFusedEpilogueRMSNormDescriptor_t desc)
 try
 {
+    if(desc != nullptr && desc->owns_scale && desc->per_row_scale != nullptr)
+        static_cast<void>(hipFree(desc->per_row_scale));
     delete desc;
     return HIPBLAS_STATUS_SUCCESS;
 }
@@ -932,11 +937,10 @@ try
     hipblasStatus_t return_status = HIPBLAS_STATUS_SUCCESS;
 
     // Fused-epilogue guard. Wired for gfx950:
-    //   - full RMSNorm (single-call producer K1 + reduce-and-apply Kernel 2), and
-    //   - the decomposed consumer (RMSNORM_SCALE_APPLY / Kernel 3 RstdScale), which applies a
-    //     per-row rstd carried in the handoff descriptor to GEMM2's output.
-    // The decomposed producer (PARTIAL_RMSNORM_STATS) still has no reduce-and-return kernel, so
-    // keep rejecting it (and any other unsupported fused chain) with NOT_SUPPORTED before launch.
+    //   - full RMSNorm (single-call producer K1 + reduce-and-apply row_div),
+    //   - the decomposed producer (PARTIAL_RMSNORM_STATS / K1 + row_rstd reduce-and-return), and
+    //   - the decomposed consumer (RMSNORM_SCALE_APPLY / Kernel 3 RstdScale).
+    // Any other fused chain has no matching kernel yet, so reject with NOT_SUPPORTED before launch.
     if(auto* desc = (rocblaslt_matmul_desc)matmul_descr)
     {
         if(desc->fused_epilogue != nullptr)
@@ -948,10 +952,32 @@ try
                 = fused_epilogue_has_stage(fused, HIPBLASLT_FUSEABLE_EPILOGUE_RMSNORM_SCALE_APPLY);
             const bool partialStats
                 = fused_epilogue_has_stage(fused, HIPBLASLT_FUSEABLE_EPILOGUE_PARTIAL_RMSNORM_STATS);
-            if(partialStats || (!fullRmsNorm && !scaleApply))
+            if(!fullRmsNorm && !scaleApply && !partialStats)
             {
                 rocblaslt::Debug::Instance().markerStop();
                 return HIPBLAS_STATUS_NOT_SUPPORTED;
+            }
+            // Decomposed producer: the library owns the per-row rstd handoff buffer. Allocate it
+            // (FP32 [rows*batch], rows rounded up so the consumer's padded rstd read stays in
+            // bounds) on the first producer call if the caller has not provided one; the producer's
+            // row_rstd reduction fills it and the consumer GEMM2 reads it. Freed on descriptor
+            // destroy.
+            if(partialStats && fused->rmsnorm_stats != nullptr
+               && fused->rmsnorm_stats->per_row_scale == nullptr)
+            {
+                auto*          dlay       = (rocblaslt_matrix_layout)matD;
+                const uint64_t rows       = dlay ? dlay->m : 0;
+                const int32_t  batch      = dlay ? dlay->batch_count : 1;
+                const uint64_t paddedRows = ((rows + 255) / 256) * 256;
+                void*          scale      = nullptr;
+                if(paddedRows > 0
+                   && hipMalloc(&scale, paddedRows * static_cast<size_t>(batch) * sizeof(float))
+                          == hipSuccess)
+                {
+                    fused->rmsnorm_stats->per_row_scale = scale;
+                    fused->rmsnorm_stats->populated     = true;
+                    fused->rmsnorm_stats->owns_scale    = true;
+                }
             }
         }
     }

@@ -1148,3 +1148,205 @@ TEST(FusedEpilogueE2E, decomposedScaleApplyMatchesReference)
     hipFree(dRstd);
     hipFree(dWs);
 }
+
+// ---- End-to-end: decomposed producer(GEMM1) -> consumer(GEMM2) two-call flow ----
+//
+// The full decomposed RMSNorm flow across two matmul calls linked by the library-populated
+// RMSNorm handoff descriptor (no test hook):
+//   GEMM1 (producer, PARTIAL_RMSNORM_STATS): h2 = (x @ W0) * gamma  [M, N_hidden]; the library
+//     runs K1 (PartialRMS) + row_rstd, stashing rstd = rsqrt(mean(h1^2)+eps) in the handoff.
+//   GEMM2 (consumer, RMSNORM_SCALE_APPLY):    y  = rstd * (h2 @ W1)  [M, N_out] via Kernel 3.
+// The combined result equals RMSNorm(x @ W0) @ W1. gamma=1 keeps the reference simple. TN bf16;
+// h2 is produced row-major [M, N_hidden] and fed to GEMM2 as its TN A operand (lda=N_hidden).
+// Needs a merged K1(PartialRMS)+K3(RstdScale) gfx950 library; gfx950-only.
+namespace
+{
+    // TN (opA=T, opB=N) bf16 GEMM D[m,n]=op(A)op(B) with a fused epilogue attached. A is [k,m]
+    // col-major (ld=lda), B is [k,n] col-major (ld=k), C/D are [m,n] col-major (ld=m).
+    hipblasStatus_t runTnBf16GemmFused(hipblasLtHandle_t                   handle,
+                                       int64_t                            m,
+                                       int64_t                            n,
+                                       int64_t                            k,
+                                       void*                              dA,
+                                       int64_t                            lda,
+                                       void*                              dB,
+                                       void*                              dC,
+                                       void*                              dD,
+                                       hipblasLtFusedEpilogueDescriptor_t fused,
+                                       void*                              dWs,
+                                       size_t                             wsSize,
+                                       int*                               algoCount)
+    {
+        *algoCount = 0;
+        hipblasLtMatrixLayout_t lA = nullptr, lB = nullptr, lC = nullptr, lD = nullptr;
+        hipblasLtMatrixLayoutCreate(&lA, HIP_R_16BF, k, m, lda);
+        hipblasLtMatrixLayoutCreate(&lB, HIP_R_16BF, k, n, k);
+        hipblasLtMatrixLayoutCreate(&lC, HIP_R_16BF, m, n, m);
+        hipblasLtMatrixLayoutCreate(&lD, HIP_R_16BF, m, n, m);
+        hipblasLtMatmulDesc_t mm = nullptr;
+        hipblasLtMatmulDescCreate(&mm, HIPBLAS_COMPUTE_32F, HIP_R_32F);
+        hipblasOperation_t opT = HIPBLAS_OP_T, opN = HIPBLAS_OP_N;
+        hipblasLtMatmulDescSetAttribute(mm, HIPBLASLT_MATMUL_DESC_TRANSA, &opT, sizeof(opT));
+        hipblasLtMatmulDescSetAttribute(mm, HIPBLASLT_MATMUL_DESC_TRANSB, &opN, sizeof(opN));
+        hipblasLtMatmulDescSetAttribute(
+            mm, HIPBLASLT_MATMUL_DESC_FUSED_EPILOGUE, &fused, sizeof(fused));
+        hipblasLtMatmulPreference_t pref = nullptr;
+        hipblasLtMatmulPreferenceCreate(&pref);
+        hipblasLtMatmulPreferenceSetAttribute(
+            pref, HIPBLASLT_MATMUL_PREF_MAX_WORKSPACE_BYTES, &wsSize, sizeof(wsSize));
+        hipblasLtMatmulHeuristicResult_t heur[1];
+        hipblasLtMatmulAlgoGetHeuristic(handle, mm, lA, lB, lC, lD, pref, 1, heur, algoCount);
+        float           alpha = 1.0f, beta = 0.0f;
+        hipblasStatus_t status = HIPBLAS_STATUS_SUCCESS;
+        if(*algoCount > 0)
+            status = hipblasLtMatmul(handle, mm, &alpha, dA, lA, dB, lB, &beta, dC, lC, dD, lD,
+                                     &heur[0].algo, dWs, wsSize, nullptr);
+        hipblasLtMatmulPreferenceDestroy(pref);
+        hipblasLtMatmulDescDestroy(mm);
+        hipblasLtMatrixLayoutDestroy(lA);
+        hipblasLtMatrixLayoutDestroy(lB);
+        hipblasLtMatrixLayoutDestroy(lC);
+        hipblasLtMatrixLayoutDestroy(lD);
+        return status;
+    }
+}
+
+TEST(FusedEpilogueE2E, decomposedProducerConsumerMatchesReference)
+{
+    if(!deviceIsGfx950())
+        GTEST_SKIP() << "decomposed RMSNorm flow is wired for gfx950 only";
+
+    const int64_t M = 1024, Nhidden = 1024, K0 = 64, Nout = 64;
+    const float   eps = 1e-5f;
+
+    std::vector<uint16_t> hX(static_cast<size_t>(K0) * M);
+    std::vector<uint16_t> hW0(static_cast<size_t>(K0) * Nhidden);
+    std::vector<uint16_t> hW1(static_cast<size_t>(Nhidden) * Nout);
+    std::vector<uint16_t> hGamma(static_cast<size_t>(Nhidden), f32_to_bf16(1.0f)); // gamma = 1
+
+    std::mt19937                          rng(4242);
+    std::uniform_real_distribution<float> dist(-0.1f, 0.1f);
+    for(auto& v : hX)
+        v = f32_to_bf16(dist(rng));
+    for(auto& v : hW0)
+        v = f32_to_bf16(dist(rng));
+    for(auto& v : hW1)
+        v = f32_to_bf16(dist(rng));
+
+    void *dX = nullptr, *dW0 = nullptr, *dGamma = nullptr, *dH2 = nullptr, *dW1 = nullptr,
+         *dD2                = nullptr, *dWs = nullptr;
+    const size_t wsSize      = size_t(256) * 1024 * 1024;
+    ASSERT_EQ(hipMalloc(&dX, hX.size() * 2), hipSuccess);
+    ASSERT_EQ(hipMalloc(&dW0, hW0.size() * 2), hipSuccess);
+    ASSERT_EQ(hipMalloc(&dGamma, hGamma.size() * 2), hipSuccess);
+    ASSERT_EQ(hipMalloc(&dH2, size_t(M) * Nhidden * 2), hipSuccess);
+    ASSERT_EQ(hipMalloc(&dW1, hW1.size() * 2), hipSuccess);
+    ASSERT_EQ(hipMalloc(&dD2, size_t(M) * Nout * 2), hipSuccess);
+    ASSERT_EQ(hipMalloc(&dWs, wsSize), hipSuccess);
+    ASSERT_EQ(hipMemcpy(dX, hX.data(), hX.size() * 2, hipMemcpyHostToDevice), hipSuccess);
+    ASSERT_EQ(hipMemcpy(dW0, hW0.data(), hW0.size() * 2, hipMemcpyHostToDevice), hipSuccess);
+    ASSERT_EQ(hipMemcpy(dGamma, hGamma.data(), hGamma.size() * 2, hipMemcpyHostToDevice),
+              hipSuccess);
+    ASSERT_EQ(hipMemcpy(dW1, hW1.data(), hW1.size() * 2, hipMemcpyHostToDevice), hipSuccess);
+
+    hipblasLtHandle_t handle = nullptr;
+    ASSERT_EQ(hipblasLtCreate(&handle), HIPBLAS_STATUS_SUCCESS);
+
+    // Library-populated handoff shared by both calls (no test hook).
+    hipblasLtFusedEpilogueRMSNormDescriptor_t stats = nullptr;
+    ASSERT_EQ(hipblasLtFusedEpilogueRMSNormDescriptorCreate(&stats), HIPBLAS_STATUS_SUCCESS);
+
+    // Producer chain: partial RMSNorm stats + gamma + eps + handoff.
+    hipblasLtFusedEpilogueDescriptor_t prod = nullptr;
+    ASSERT_EQ(hipblasLtFusedEpilogueCreate(&prod), HIPBLAS_STATUS_SUCCESS);
+    ASSERT_EQ(hipblasLtFusedEpilogueAdd(prod, HIPBLASLT_FUSEABLE_EPILOGUE_PARTIAL_RMSNORM_STATS),
+              HIPBLAS_STATUS_SUCCESS);
+    ASSERT_EQ(hipblasLtFusedEpilogueSetAttribute(
+                  prod, HIPBLASLT_FUSED_EPILOGUE_RMSNORM_GAMMA, &dGamma, sizeof(dGamma)),
+              HIPBLAS_STATUS_SUCCESS);
+    ASSERT_EQ(hipblasLtFusedEpilogueSetAttribute(
+                  prod, HIPBLASLT_FUSED_EPILOGUE_RMSNORM_EPS, &eps, sizeof(eps)),
+              HIPBLAS_STATUS_SUCCESS);
+    ASSERT_EQ(hipblasLtFusedEpilogueSetAttribute(
+                  prod, HIPBLASLT_FUSED_EPILOGUE_RMSNORM_STATS, &stats, sizeof(stats)),
+              HIPBLAS_STATUS_SUCCESS);
+
+    // GEMM1 producer: h2 [M, N_hidden] (row-major) + rstd stashed in the handoff.
+    int algoCount = 0;
+    ASSERT_EQ(runTnBf16GemmFused(handle, M, Nhidden, K0, dX, K0, dW0, dH2, dH2, prod, dWs, wsSize,
+                                 &algoCount),
+              HIPBLAS_STATUS_SUCCESS);
+    ASSERT_GT(algoCount, 0) << "no PartialRMS (K1) producer solution selected";
+    ASSERT_EQ(hipDeviceSynchronize(), hipSuccess);
+
+    // Consumer chain: scale-apply + the same handoff.
+    hipblasLtFusedEpilogueDescriptor_t cons = nullptr;
+    ASSERT_EQ(hipblasLtFusedEpilogueCreate(&cons), HIPBLAS_STATUS_SUCCESS);
+    ASSERT_EQ(hipblasLtFusedEpilogueAdd(cons, HIPBLASLT_FUSEABLE_EPILOGUE_RMSNORM_SCALE_APPLY),
+              HIPBLAS_STATUS_SUCCESS);
+    ASSERT_EQ(hipblasLtFusedEpilogueSetAttribute(
+                  cons, HIPBLASLT_FUSED_EPILOGUE_RMSNORM_STATS, &stats, sizeof(stats)),
+              HIPBLAS_STATUS_SUCCESS);
+
+    // GEMM2 consumer: h2 (row-major [M, N_hidden]) is the TN A operand [N_hidden, M] (lda=N_hidden).
+    ASSERT_EQ(runTnBf16GemmFused(handle, M, Nout, Nhidden, dH2, Nhidden, dW1, dD2, dD2, cons, dWs,
+                                 wsSize, &algoCount),
+              HIPBLAS_STATUS_SUCCESS);
+    ASSERT_GT(algoCount, 0) << "no RstdScale (K3) consumer solution selected";
+    ASSERT_EQ(hipDeviceSynchronize(), hipSuccess);
+
+    std::vector<uint16_t> hD2(static_cast<size_t>(M) * Nout);
+    ASSERT_EQ(hipMemcpy(hD2.data(), dD2, hD2.size() * 2, hipMemcpyDeviceToHost), hipSuccess);
+
+    // Reference: gemm1 = x@W0 (TN); rstd = rsqrt(mean(gemm1^2)+eps); y = rstd * (gemm1 @ W1).
+    std::vector<float> gemm1(static_cast<size_t>(M) * Nhidden);
+    std::vector<float> rstd(static_cast<size_t>(M));
+    for(int64_t m = 0; m < M; ++m)
+    {
+        float ss = 0.0f;
+        for(int64_t j = 0; j < Nhidden; ++j)
+        {
+            float acc = 0.0f;
+            for(int64_t k = 0; k < K0; ++k)
+                acc += bf16_to_f32(hX[k + m * K0]) * bf16_to_f32(hW0[k + j * K0]);
+            gemm1[m * Nhidden + j] = acc;
+            ss += acc * acc;
+        }
+        rstd[m] = 1.0f / std::sqrt(ss / static_cast<float>(Nhidden) + eps);
+    }
+    // Consumer reference. Mirror the device's bf16 storage: h2 = bf16(gemm1) (gamma=1) is stored
+    // by the producer, GEMM2 reads it, then y = bf16(rstd * (h2 @ W1)). Compare with a combined
+    // absolute+relative tolerance so near-zero cancellation elements (tiny ref) do not blow up a
+    // pure relative metric.
+    size_t mismatches = 0;
+    double maxAbsErr  = 0.0;
+    for(int64_t m = 0; m < M; ++m)
+        for(int64_t n = 0; n < Nout; ++n)
+        {
+            float acc = 0.0f;
+            for(int64_t j = 0; j < Nhidden; ++j)
+            {
+                const float h2bf = bf16_to_f32(f32_to_bf16(gemm1[m * Nhidden + j])); // gamma=1
+                acc += h2bf * bf16_to_f32(hW1[j + n * Nhidden]);
+            }
+            const float ref    = bf16_to_f32(f32_to_bf16(acc * rstd[m]));
+            const float got    = bf16_to_f32(hD2[n * M + m]); // D2 col-major [M, N_out]
+            const float absErr = std::abs(got - ref);
+            maxAbsErr          = std::max(maxAbsErr, static_cast<double>(absErr));
+            if(absErr > std::max(3e-2f, 5e-2f * std::abs(ref)))
+                ++mismatches;
+        }
+    EXPECT_EQ(mismatches, 0u) << "max abs error " << maxAbsErr;
+
+    hipblasLtFusedEpilogueDestroy(prod);
+    hipblasLtFusedEpilogueDestroy(cons);
+    hipblasLtFusedEpilogueRMSNormDescriptorDestroy(stats);
+    hipblasLtDestroy(handle);
+    hipFree(dX);
+    hipFree(dW0);
+    hipFree(dGamma);
+    hipFree(dH2);
+    hipFree(dW1);
+    hipFree(dD2);
+    hipFree(dWs);
+}
