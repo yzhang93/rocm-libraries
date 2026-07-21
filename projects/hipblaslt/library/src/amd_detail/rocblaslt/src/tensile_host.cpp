@@ -1835,8 +1835,58 @@ namespace
     /****************************************************************
  * Construct a Tensile Problem from a RocblasltContractionProblem *
  ****************************************************************/
-    auto ConstructTensileProblem(const RocblasltContractionProblem& prob)
+    // ---- Fused-RMSNorm (PartialRMS) row-major transpose -----------------------
+    // The current PartialRMS K1 emitter reduces the sum-of-squares over free0, so the
+    // GEMM must be arranged with free0 = N_hidden (the RMSNorm reduction axis). We
+    // achieve this by computing the transposed GEMM  D^T = op(B)^T * op(A)^T:
+    //   - swap m<->n and the A/B operands, flip both transposes (TN stays TN),
+    //   - make C/D contiguous with N_hidden as the leading (free0) dimension, which
+    //     lands the output as row-major [M, N_hidden] -- the layout Kernel 2 (row_div)
+    //     consumes and that hipBLASLt returns for the fused-RMSNorm epilogue.
+    static bool partialRMSNeedsTranspose(const RocblasltContractionProblem& p)
     {
+        RocblasltFusedEpilogueInfo fInfo;
+        return rocblaslt_resolve_fused_epilogue(p.fused_epilogue, fInfo) && fInfo.hasRMSNorm;
+    }
+
+    static hipblasOperation_t flipTransOp(hipblasOperation_t op)
+    {
+        return op == HIPBLAS_OP_N ? HIPBLAS_OP_T : HIPBLAS_OP_N;
+    }
+
+    static RocblasltContractionProblem transposeForPartialRMS(const RocblasltContractionProblem& p)
+    {
+        RocblasltContractionProblem t = p; // copy scalars, epilogue, workspace, gamma/eps ptr, etc.
+        t.trans_a = flipTransOp(p.trans_b);
+        t.trans_b = flipTransOp(p.trans_a);
+        t.m       = p.n; // free0 <- N_hidden
+        t.n       = p.m; // free1 <- M (tokens)
+
+        // A <- original B
+        t.a_type = p.b_type;   t.A = p.B;   t.batch_A = p.batch_B;
+        t.row_stride_a = p.row_stride_b; t.col_stride_a = p.col_stride_b;
+        t.batch_stride_a = p.batch_stride_b;
+        t.scaleA = p.scaleB; t.scaleAType = p.scaleBType; t.swizzleA = p.swizzleB;
+        // B <- original A
+        t.b_type = p.a_type;   t.B = p.A;   t.batch_B = p.batch_A;
+        t.row_stride_b = p.row_stride_a; t.col_stride_b = p.col_stride_a;
+        t.batch_stride_b = p.batch_stride_a;
+        t.scaleB = p.scaleA; t.scaleBType = p.scaleAType; t.swizzleB = p.swizzleA;
+
+        // C/D become [N_hidden, M] contiguous col-major (ld = N_hidden) == row-major [M, N_hidden].
+        t.row_stride_c = 1; t.col_stride_c = p.n;
+        t.row_stride_d = 1; t.col_stride_d = p.n;
+        return t;
+    }
+
+    auto ConstructTensileProblem(const RocblasltContractionProblem& probIn)
+    {
+        // Fused RMSNorm: transpose so free0 = N_hidden (see transposeForPartialRMS).
+        const bool _prmsSwap = partialRMSNeedsTranspose(probIn);
+        RocblasltContractionProblem probStorage
+            = _prmsSwap ? transposeForPartialRMS(probIn) : probIn;
+        const RocblasltContractionProblem& prob = probStorage;
+
         auto a_type       = hipDataType_to_tensile_type(prob.a_type);
         auto b_type       = hipDataType_to_tensile_type(prob.b_type);
         auto c_type       = hipDataType_to_tensile_type(prob.c_type);
@@ -2117,6 +2167,24 @@ namespace
         tensileProblem.setParams().setStreamKTileSchedulingMode(prob.streamk_tile_scheduling_ext);
         tensileProblem.setParams().setSmCountTarget(prob.sm_count_target);
 
+        // Fused RMSNorm epilogue (full flow): translate the attached composable fused-epilogue
+        // chain into the TensileLite PartialRMS problem flags so solution selection matches the
+        // fused-RMSNorm (PartialRMS) kernels. The single RMSNorm stage drives the full flow; the
+        // decomposed producer/consumer stages are wired separately. gamma/partialBuf/residual
+        // pointers and the partialBuf workspace carve are handled on the launch path. This stays
+        // dormant until the HIPBLASLT_MATMUL_DESC_FUSED_EPILOGUE NOT_SUPPORTED gate in
+        // amd_detail/hipblaslt.cpp is lifted (after Kernel 2 lands). See
+        // docs/design/fused_epilogue_rmsnorm.md.
+        RocblasltFusedEpilogueInfo fusedInfo;
+        if(rocblaslt_resolve_fused_epilogue(prob.fused_epilogue, fusedInfo))
+        {
+            if(fusedInfo.hasRMSNorm)
+            {
+                tensileProblem.setUsePartialRMS(true);
+                tensileProblem.setPartialRMSResidualAdd(fusedInfo.hasResidualAdd);
+            }
+        }
+
         // set AmaxD
         tensileProblem.setOutputAmaxD(prob.amaxD != nullptr);
         tensileProblem.setAmaxD(compute_type, true);
@@ -2137,9 +2205,15 @@ namespace
         return tensileProblem;
     }
 
-    void updateTensileProblem(const RocblasltContractionProblem&   prob,
+    void updateTensileProblem(const RocblasltContractionProblem&   probIn,
                               TensileLite::ContractionProblemGemm& tensileProblem)
     {
+        // Fused RMSNorm: transpose so free0 = N_hidden (see transposeForPartialRMS).
+        const bool _prmsSwap = partialRMSNeedsTranspose(probIn);
+        RocblasltContractionProblem probStorage
+            = _prmsSwap ? transposeForPartialRMS(probIn) : probIn;
+        const RocblasltContractionProblem& prob = probStorage;
+
         auto a_type       = hipDataType_to_tensile_type(prob.a_type);
         auto b_type       = hipDataType_to_tensile_type(prob.b_type);
         auto c_type       = hipDataType_to_tensile_type(prob.c_type);
@@ -2376,6 +2450,20 @@ namespace
         tensileProblem.setParams().setStreamKTileSchedulingMode(prob.streamk_tile_scheduling_ext);
         tensileProblem.setParams().setSmCountTarget(prob.sm_count_target);
 
+        // Fused RMSNorm full flow: this per-call refresh is used by getBestSolutions (heuristic
+        // selection) and runContractionProblem, so it must set the PartialRMS problem flags too
+        // (ConstructTensileProblem alone is not enough — the cached problem is refreshed here on
+        // every call). Without this, selection would route the fused problem to a normal solution.
+        {
+            RocblasltFusedEpilogueInfo fusedInfo;
+            if(rocblaslt_resolve_fused_epilogue(prob.fused_epilogue, fusedInfo)
+               && fusedInfo.hasRMSNorm)
+            {
+                tensileProblem.setUsePartialRMS(true);
+                tensileProblem.setPartialRMSResidualAdd(fusedInfo.hasResidualAdd);
+            }
+        }
+
         // set E
         if(is_e_enabled(prob.epilogue))
         {
@@ -2451,8 +2539,15 @@ namespace
     /***************************************************************
  * Construct the inputs to a Tensile ContractionProblemGemm        *
  ***************************************************************/
-    auto GetTensileInputs(const RocblasltContractionProblem& prob)
+    auto GetTensileInputs(const RocblasltContractionProblem& probIn)
     {
+        // Fused RMSNorm: swap A/B pointers to match the transposed problem so the
+        // kernel receives operands consistent with free0 = N_hidden.
+        const bool _prmsSwap = partialRMSNeedsTranspose(probIn);
+        RocblasltContractionProblem probStorage
+            = _prmsSwap ? transposeForPartialRMS(probIn) : probIn;
+        const RocblasltContractionProblem& prob = probStorage;
+
         auto compute_type = roc2TensileType(prob.compute_type, false);
 
         // Structure describing the inputs (A, B, C, D, alpha, beta)
@@ -2475,6 +2570,19 @@ namespace
         inputs.workspaceSize = prob.workspaceSize;
 
         inputs.Synchronizer = prob.Synchronizer;
+
+        // Fused RMSNorm epilogue (full flow) inputs. The K1 producer consumes gamma, and the
+        // residual tensor when residual-add is chained; both are caller-owned device pointers
+        // from the fused-epilogue descriptor. partialBuf is a transient reduction scratch that
+        // K1 writes and Kernel 2 reads; it is sized from the selected solution's macro tiles and
+        // carved from the workspace at solve time (G3), so it is intentionally left null here.
+        // Dormant until the HIPBLASLT_MATMUL_DESC_FUSED_EPILOGUE gate is lifted.
+        RocblasltFusedEpilogueInfo fusedInputs;
+        if(rocblaslt_resolve_fused_epilogue(prob.fused_epilogue, fusedInputs))
+        {
+            inputs.rmsGamma = fusedInputs.rmsnormGamma;
+            inputs.residual = fusedInputs.residual;
+        }
 
         // set bias vector
         if(is_bias_enabled(prob.epilogue))
@@ -3296,6 +3404,119 @@ bool useRocRoller(rocblaslt_handle handle, const RocblasltContractionProblem& pr
 #endif
 
 /******************************************************************************
+ * Fused-RMSNorm "Kernel 2" (reduce-and-apply). Host-launched companion to the *
+ * TensileLite PartialRMS GEMM (K1): reduces K1's per-tile partial sums-of-     *
+ * squares and applies the per-row RMSNorm scale to D in place. The code object *
+ * partial_rms_epilogue_<arch>.co is shipped by device-library/partial-rms and  *
+ * loaded like the matrix-transform kernel (single hard-coded kernel name).     *
+ ******************************************************************************/
+namespace
+{
+    std::optional<std::filesystem::path> partialRmsCodeObjectPath()
+    {
+        int             deviceId{};
+        hipDeviceProp_t props{};
+        if(hipGetDevice(&deviceId) != hipSuccess
+           || hipGetDeviceProperties(&props, deviceId) != hipSuccess)
+            return std::nullopt;
+
+        std::string archName = props.gcnArchName;
+        auto        colonPos = archName.find(':');
+        if(colonPos != std::string::npos)
+            archName = archName.substr(0, colonPos);
+
+        auto relpath = std::filesystem::path(archName)
+                       / ("row_div_" + archName + ".co");
+        return rocblaslt_find_library_relative_path(relpath);
+    }
+
+    const std::string& partialRmsCodeObjectFileName()
+    {
+        static const std::string name = [] {
+            auto path = partialRmsCodeObjectPath();
+            return path ? path->filename().string() : std::string{};
+        }();
+        return name;
+    }
+
+    // One persistent adapter per device, with the code-object dir set once (mirrors
+    // rocblaslt_transform.cpp::transformAdapter).
+    TensileLite::hip::SolutionAdapter& partialRmsAdapter()
+    {
+        using AdapterPtr     = std::unique_ptr<TensileLite::hip::SolutionAdapter>;
+        static auto& adapters = []() -> std::vector<AdapterPtr>& {
+            static std::vector<AdapterPtr> a;
+            int                            numDevices{};
+            HIP_CHECK_EXC(hipGetDeviceCount(&numDevices));
+            for(int i = 0; i < numDevices; ++i)
+                a.emplace_back(new TensileLite::hip::SolutionAdapter);
+            auto coPath = partialRmsCodeObjectPath();
+            if(coPath)
+            {
+                const std::string coFolder = coPath->parent_path().string();
+                for(auto& adp : a)
+                {
+                    try
+                    {
+                        adp->codeObjectDir(coFolder);
+                    }
+                    catch(const std::runtime_error&)
+                    {
+                    }
+                }
+            }
+            return a;
+        }();
+
+        int deviceId{};
+        HIP_CHECK_EXC(hipGetDevice(&deviceId));
+        return *adapters.at(deviceId);
+    }
+
+    // Launch row_div (Kernel 2) on `stream` after K1 has completed (same stream => ordered).
+    // Row-major convention: D is row-major [tokens M, N_hidden] (N_hidden contiguous),
+    // partialBuf is [mPad, nD] with one fp32 partial Sum-of-squares per (token, N_hidden tile).
+    // row_div reduces partialBuf across the nD tiles per token and divides D in place by
+    // sqrt(inv_d * Sigma + eps). Kernarg layout matches buildRowDivArgs:
+    //   0 D, 8 partialBuf, 16 pad(i32=0), 20 n(=N_hidden), 24 n_c(=RD_BLOCK), 28 n_d(=nD),
+    //   32 inv_d(=1/N_hidden), 36 eps. grid=(M, N_hidden/RD_BLOCK, 1), block=(64,1,1).
+    hipError_t launchRowDiv(void*       D,
+                            void*       partialBuf,
+                            uint32_t    tokensM,
+                            uint32_t    nHidden,
+                            uint32_t    nD,
+                            float       eps,
+                            hipStream_t stream)
+    {
+        constexpr uint32_t RD_BLOCK = 128; // N_hidden columns processed per row_div block
+        constexpr uint32_t block    = 64;
+        const float        invD     = nHidden ? (1.0f / static_cast<float>(nHidden)) : 0.0f;
+        const uint32_t     nSplit   = (nHidden + RD_BLOCK - 1) / RD_BLOCK;
+
+        TensileLite::KernelArguments kArgs(false);
+        kArgs.appendAligned("D", D);
+        kArgs.appendAligned("partialBuf", partialBuf);
+        kArgs.appendAligned("pad", static_cast<uint32_t>(0));
+        kArgs.appendAligned("n", nHidden);
+        kArgs.appendAligned("n_c", RD_BLOCK);
+        kArgs.appendAligned("n_d", nD);
+        kArgs.appendAligned("inv_d", invD);
+        kArgs.appendAligned("eps", eps);
+
+        TensileLite::KernelInvocation invocation{"row_div",
+                                                 partialRmsCodeObjectFileName(),
+                                                 false,
+                                                 {1, 1, 1},
+                                                 {block, 1, 1},
+                                                 {tokensM, nSplit, 1},
+                                                 {tokensM * block, nSplit, 1},
+                                                 0,
+                                                 kArgs};
+        return partialRmsAdapter().launchKernel(invocation, stream, nullptr, nullptr);
+    }
+}
+
+/******************************************************************************
  * runContractionProblem calls Tensile to run a contraction problem described *
  * by RocblasltContractionProblem *
  ******************************************************************************/
@@ -3471,7 +3692,41 @@ rocblaslt_status runContractionProblem(rocblaslt_handle                   handle
             // set XCC=1 to param when this is a fallback solution
             data->problem.setParams().setWGMXCC((isCUFallback ? 1 : 0));
 
-            auto kernels = solution->solve(data->problem, GetTensileInputs(prob), *hardware);
+            // Fused RMSNorm full flow (G3): carve the transient partialBuf from the workspace
+            // tail (after any GSU/StreamK region) so K1 can write it, and gather the values
+            // Kernel 2 needs. inputs.partialBuf must be set on the inputs handed to solve() so
+            // K1's arg-pack (ContractionSolution::singleCallArgs) receives a valid pointer.
+            void*    partialRmsBuf     = nullptr;
+            uint32_t partialRmsNTilesN = 0;
+            float    partialRmsEps     = 0.f;
+            if(solution->sizeMapping.partialRMS)
+            {
+                // row_div (Kernel 2) processes N_hidden in RD_BLOCK(=128)-column strips.
+                if(prob.n % 128 != 0)
+                {
+                    log_error(__func__,
+                              "fused RMSNorm row_div requires N_hidden to be a multiple of 128");
+                    return rocblaslt_status_not_implemented;
+                }
+                const size_t pbBytes = solution->partialRMSPartialBufBytes(data->problem);
+                const size_t total   = solution->requiredWorkspaceSize(data->problem, *hardware);
+                if(pbBytes && prob.workspace && total >= pbBytes)
+                    partialRmsBuf = static_cast<uint8_t*>(prob.workspace) + (total - pbBytes);
+
+                // partialBuf has nD = ceil(N_hidden / MT0) tiles per token (K1 reduces free0 =
+                // N_hidden, tiled by MacroTile0). prob.n is N_hidden in the caller-facing problem.
+                const size_t mt0  = solution->sizeMapping.macroTile.x;
+                partialRmsNTilesN = mt0 ? static_cast<uint32_t>((prob.n + mt0 - 1) / mt0) : 0;
+
+                RocblasltFusedEpilogueInfo fInfo;
+                if(rocblaslt_resolve_fused_epilogue(prob.fused_epilogue, fInfo))
+                    partialRmsEps = fInfo.rmsnormEps;
+            }
+
+            auto tensileInputs = GetTensileInputs(prob);
+            if(solution->sizeMapping.partialRMS)
+                tensileInputs.partialBuf = partialRmsBuf;
+            auto kernels = solution->solve(data->problem, tensileInputs, *hardware);
             // Remove this after supports getting comgr buffers from hip.
             bool isPreloaded = false;
             if(rocblaslt::Debug::Instance().preload())
@@ -3505,6 +3760,23 @@ rocblaslt_status runContractionProblem(rocblaslt_handle                   handle
             }
             status = hip2RocStatus(
                 adapter->launchKernels(kernels, prob.stream, nullptr, nullptr, isPreloaded));
+
+            // Fused RMSNorm full flow (G3): after K1 (GEMM + partial-stats producer) completes,
+            // launch Kernel 2 on the same stream to reduce partialBuf and apply the per-row
+            // RMSNorm scale to D in place.
+            if(status == rocblaslt_status_success && solution->sizeMapping.partialRMS
+               && partialRmsBuf != nullptr)
+            {
+                status = hip2RocStatus(
+                    launchRowDiv(reinterpret_cast<void*>(prob.D),
+                                 partialRmsBuf,
+                                 static_cast<uint32_t>(prob.m), // tokens
+                                 static_cast<uint32_t>(prob.n), // N_hidden
+                                 partialRmsNTilesN,             // nD
+                                 partialRmsEps,
+                                 prob.stream));
+            }
+
             if(rocblaslt::Debug::Instance().printLogAsMarker())
                 rocblaslt::Debug::Instance().logMarkerStop();
         }
