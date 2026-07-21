@@ -359,6 +359,11 @@ namespace TensileLite
         size_t requiredWorkspaceSizeGsu(Problem const&  problem,
                                         Hardware const& hardware,
                                         size_t          gsu) const;
+
+        // Bytes of transient scratch the fused-RMSNorm K1 producer needs for its per-tile
+        // partial-sum-of-squares buffer (0 unless sizeMapping.partialRMS). Sized from the
+        // solution's macro tile: ceil(M/MT0)*MT0 * ceil(N/MT1) * batch * sizeof(float).
+        size_t partialRMSPartialBufBytes(Problem const& problem) const;
         size_t requiredWorkspaceSizeGroupedGemm(std::vector<Problem> const& problems,
                                                 Hardware const&             hardware) const;
         size_t requiredHostSizeGroupedGemmSingle(Problem const&  problem,

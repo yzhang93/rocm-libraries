@@ -600,6 +600,15 @@ struct RocblasltContractionProblem
     // precedence resolution. 0 = "use all CUs the device exposes".
     int32_t sm_count_target = 0;
 
+    // Non-owning pointer to a composable fused-epilogue chain attached to the
+    // matmul descriptor via HIPBLASLT_MATMUL_DESC_FUSED_EPILOGUE. nullptr means
+    // "no fused epilogue". Set post-construction in the matmul path (mirrors the
+    // streamk_tile_scheduling_ext/sm_count_target pattern) so the existing
+    // constructor signature and its call sites are unchanged. Consumed by
+    // ConstructTensileProblem to drive the TensileLite PartialRMS (fused RMSNorm)
+    // problem flags. See docs/design/fused_epilogue_rmsnorm.md.
+    const struct hipblasLtFusedEpilogueDescriptor* fused_epilogue = nullptr;
+
     // gemm_ex
     // gemm_strided_batched_ex
     RocblasltContractionProblem(hipblasOperation_t     trans_a,
@@ -665,6 +674,29 @@ struct RocblasltContractionProblem
                                 int32_t                streamk_tile_scheduling_ext = 0,
                                 int32_t                sm_count_target         = 0);
 };
+
+// Resolved view of a composable fused-epilogue chain. The opaque handle
+// (hipblasLtFusedEpilogueDescriptor) is defined only in amd_detail/hipblaslt.cpp, so the
+// rocblaslt / TensileLite layers cannot read its fields directly. This POD exposes exactly
+// what ConstructTensileProblem and the launch path need to drive the fused RMSNorm
+// (TensileLite PartialRMS) solution. See docs/design/fused_epilogue_rmsnorm.md.
+struct RocblasltFusedEpilogueInfo
+{
+    bool        hasRMSNorm           = false; // full RMSNorm stage (single-call flow)
+    bool        hasPartialRMSStats   = false; // decomposed producer (GEMM1)
+    bool        hasRMSNormScaleApply = false; // decomposed consumer (GEMM2)
+    bool        hasResidualAdd       = false;
+    const void* rmsnormGamma         = nullptr;
+    float       rmsnormEps           = 0.f;
+    const void* residual             = nullptr;
+    const void* residualOutput       = nullptr;
+};
+
+// Resolve an opaque fused-epilogue handle into the POD above. Returns false when desc is
+// nullptr (no fused epilogue attached), true otherwise. Defined in
+// amd_detail/hipblaslt.cpp where the handle definition is complete.
+bool rocblaslt_resolve_fused_epilogue(const struct hipblasLtFusedEpilogueDescriptor* desc,
+                                      RocblasltFusedEpilogueInfo&                    out);
 
 namespace rocblaslt
 {

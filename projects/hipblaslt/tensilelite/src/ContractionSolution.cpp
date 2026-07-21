@@ -3626,7 +3626,39 @@ namespace TensileLite
                                                        : calculateAutoGSU(problem, &hardware);
             size += requiredWorkspaceSizeGsu(problem, hardware, gsu);
         }
+
+        // Fused RMSNorm (full flow): the K1 producer writes a transient per-tile
+        // partial-sum-of-squares buffer that the reduce-and-apply Kernel 2 consumes. It is
+        // carved from the tail of the workspace (after any GSU/StreamK region), so account
+        // for it here; the launch path uses partialRMSPartialBufBytes() to locate the offset
+        // as (requiredWorkspaceSize - partialBufBytes).
+        if(sizeMapping.partialRMS)
+            size += partialRMSPartialBufBytes(problem);
+
         return size;
+    }
+
+    size_t ContractionSolution::partialRMSPartialBufBytes(Problem const& problem) const
+    {
+        if(!sizeMapping.partialRMS)
+            return 0;
+
+        const size_t mt0 = sizeMapping.macroTile.x;
+        const size_t mt1 = sizeMapping.macroTile.y;
+        if(mt0 == 0 || mt1 == 0)
+            return 0;
+
+        // Row-major PartialRMS convention: the problem is transposed so free0 = N_hidden
+        // and free1 = M (tokens). K1 writes partialBuf[token, tile] with one fp32 per
+        // (token, free0 macro-tile): rows = padded tokens (by MT1), cols = nD tiles along
+        // N_hidden (by MT0).
+        const size_t nHidden = problem.d().sizes()[0]; // free0 = N_hidden
+        const size_t tokens  = problem.d().sizes()[1]; // free1 = M tokens
+        const size_t batch   = problem.d().sizes()[2];
+
+        const size_t nD       = (nHidden + mt0 - 1) / mt0;      // partial tiles along N_hidden
+        const size_t mPadded  = ((tokens + mt1 - 1) / mt1) * mt1; // K1 writes padded token rows
+        return mPadded * nD * batch * sizeof(float);
     }
 
     size_t ContractionSolution::requiredWorkspaceSizeGsu(Problem const&  problem,

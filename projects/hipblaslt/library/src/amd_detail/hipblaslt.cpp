@@ -483,6 +483,31 @@ namespace
     }
 }
 
+// Resolve the opaque fused-epilogue handle into the layer-visible POD declared in
+// rocblaslt-types.h. Defined here because the handle definition is private to this
+// translation unit; the rocblaslt / TensileLite layers only see the forward declaration.
+// The enclosing public API in this file is extern "C"; this helper is declared with C++
+// linkage (it lives among C++ types in rocblaslt-types.h), so force C++ linkage here to
+// match the declaration.
+extern "C++" bool rocblaslt_resolve_fused_epilogue(const hipblasLtFusedEpilogueDescriptor* desc,
+                                                   RocblasltFusedEpilogueInfo&             out)
+{
+    if(desc == nullptr)
+        return false;
+    out.hasResidualAdd
+        = fused_epilogue_has_stage(desc, HIPBLASLT_FUSEABLE_EPILOGUE_RESIDUAL_ADD);
+    out.hasRMSNorm = fused_epilogue_has_stage(desc, HIPBLASLT_FUSEABLE_EPILOGUE_RMSNORM);
+    out.hasPartialRMSStats
+        = fused_epilogue_has_stage(desc, HIPBLASLT_FUSEABLE_EPILOGUE_PARTIAL_RMSNORM_STATS);
+    out.hasRMSNormScaleApply
+        = fused_epilogue_has_stage(desc, HIPBLASLT_FUSEABLE_EPILOGUE_RMSNORM_SCALE_APPLY);
+    out.rmsnormGamma   = desc->rmsnorm_gamma;
+    out.rmsnormEps     = desc->rmsnorm_eps;
+    out.residual       = desc->residual;
+    out.residualOutput = desc->residual_output;
+    return true;
+}
+
 hipblasStatus_t hipblasLtFusedEpilogueCreate(hipblasLtFusedEpilogueDescriptor_t* desc)
 try
 {
@@ -888,16 +913,29 @@ try
     rocblaslt::Debug::Instance().markerStart("hipblasLtMatmul");
     hipblasStatus_t return_status = HIPBLAS_STATUS_SUCCESS;
 
-    // Fused-epilogue guard: a composable fused epilogue (e.g. RMSNorm) attached via
-    // HIPBLASLT_MATMUL_DESC_FUSED_EPILOGUE has a validated API surface but no kernels yet.
-    // Reject it with NOT_SUPPORTED before kernel selection/launch. Remove this guard once
-    // the TensileLite RMSNorm kernels (AIHPBLAS-3856) are wired in.
+    // Fused-epilogue guard. The full RMSNorm flow (single-call producer K1 + reduce-and-apply
+    // Kernel 2) is wired for gfx950: it maps to the TensileLite PartialRMS solution and launches
+    // partial_rms_epilogue. Problems on other arches simply find no PartialRMS solution and fail
+    // at selection. The decomposed producer/consumer stages
+    // (PARTIAL_RMSNORM_STATS / RMSNORM_SCALE_APPLY) and other reserved components have no kernels
+    // yet, so keep rejecting them here with NOT_SUPPORTED before kernel selection/launch.
     if(auto* desc = (rocblaslt_matmul_desc)matmul_descr)
     {
         if(desc->fused_epilogue != nullptr)
         {
-            rocblaslt::Debug::Instance().markerStop();
-            return HIPBLAS_STATUS_NOT_SUPPORTED;
+            const auto* fused = desc->fused_epilogue;
+            const bool  fullRmsNorm
+                = fused_epilogue_has_stage(fused, HIPBLASLT_FUSEABLE_EPILOGUE_RMSNORM);
+            const bool decomposed
+                = fused_epilogue_has_stage(fused,
+                                           HIPBLASLT_FUSEABLE_EPILOGUE_PARTIAL_RMSNORM_STATS)
+                  || fused_epilogue_has_stage(fused,
+                                              HIPBLASLT_FUSEABLE_EPILOGUE_RMSNORM_SCALE_APPLY);
+            if(!fullRmsNorm || decomposed)
+            {
+                rocblaslt::Debug::Instance().markerStop();
+                return HIPBLAS_STATUS_NOT_SUPPORTED;
+            }
         }
     }
 
