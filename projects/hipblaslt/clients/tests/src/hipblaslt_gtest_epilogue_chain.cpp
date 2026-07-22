@@ -7,25 +7,16 @@
 
 // Tests for the handle-based composable fused-epilogue API (RMSNorm focus).
 //
-// These tests validate the RMSNorm reference math plus composition rules at the API level,
-// without any fused-epilogue kernels:
-//  - The CPU reference implements y = x * rsqrt(mean(x^2) + eps) * gamma.
-//  - The create/add/set/destroy lifecycle returns SUCCESS.
-//  - An unrecognized or unsupported epilogue and an illegal/duplicate ordering are rejected
-//    by hipblasLtFusedEpilogueAdd (INVALID_VALUE).
-//  - Attaching an incomplete residual-add handle (unset residual pointer) is rejected at
-//    descriptor-set time (INVALID_VALUE). If no residual-output pointer is provided, or if
-//    it is explicitly set to NULL, the residual input is the in-place write-back target for
-//    the updated residual stream.
-//  - Attaching an incomplete RMSNorm handle (unset gamma or unset eps) is rejected at
-//    descriptor-set time (INVALID_VALUE).
-//  - The decomposed flow (partial RMSNorm stats producer + RMSNorm scale-apply consumer) is
-//    linked by an opaque, library-populated RMSNorm handoff descriptor. Its create/destroy
-//    lifecycle returns SUCCESS, full and decomposed RMSNorm stages cannot be mixed in one
-//    chain, and attaching a decomposed handle without the handoff descriptor (or, for the
-//    producer, without gamma/eps) is rejected at descriptor-set time (INVALID_VALUE).
-//  - A complete-but-unimplemented fused epilogue is rejected by hipblasLtMatmul with
-//    NOT_SUPPORTED before kernel selection/launch.
+// The lightweight tests cover descriptor lifecycle, chain ordering, attribute validation, and
+// CPU reference math. They also verify attach-time completeness for residual-add, full RMSNorm,
+// decomposed partial-stats producer, decomposed scale-apply consumer, and requant stages.
+//
+// The gfx950 E2E tests drive real kernels:
+//  - Full RMSNorm: K1 PartialRMS + row_div reduce-and-apply.
+//  - Residual-add + full RMSNorm: K1 PartialRMS residual path + row_div.
+//  - Decomposed consumer: GEMM2 + K3 RstdScale using a test-populated handoff rstd.
+//  - Decomposed two-call flow: producer K1 + row_rstd fills the handoff, then consumer K3
+//    applies the per-row rstd.
 
 #include <cmath>
 #include <cstdint>
@@ -556,39 +547,13 @@ TEST_F(FusedEpilogueTest, attachCompleteRequantAccepted)
     EXPECT_EQ(attach(), HIPBLAS_STATUS_SUCCESS);
 }
 
-TEST_F(FusedEpilogueTest, attachedDecomposedConsumerMatmulNotSupported)
-{
-    ASSERT_EQ(hipblasLtFusedEpilogueAdd(fused, HIPBLASLT_FUSEABLE_EPILOGUE_RMSNORM_SCALE_APPLY),
-              HIPBLAS_STATUS_SUCCESS);
-    completeStats();
-    ASSERT_EQ(attach(), HIPBLAS_STATUS_SUCCESS);
-
-    EXPECT_EQ(hipblasLtMatmul(nullptr,
-                              desc,
-                              nullptr,
-                              nullptr,
-                              nullptr,
-                              nullptr,
-                              nullptr,
-                              nullptr,
-                              nullptr,
-                              nullptr,
-                              nullptr,
-                              nullptr,
-                              nullptr,
-                              nullptr,
-                              0,
-                              nullptr),
-              HIPBLAS_STATUS_NOT_SUPPORTED);
-}
-
 // ---- End-to-end numeric test: full RMSNorm flow on device ----
 //
 // Drives a real bf16 TN matmul through hipblasLtMatmul with a full-RMSNorm fused epilogue
 // attached, then compares D against a CPU reference RMSNorm(alpha * op(A)*op(B), gamma, eps).
 // This exercises the wired path end to end: solution selection (UsePartialRMS predicate),
-// K1 (GEMM + partial-stats producer), and Kernel 2 (reduce-and-apply). gfx950-only, since the
-// PartialRMS solution + partial_rms_epilogue code object ship for gfx950.
+// K1 (GEMM + partial-stats producer), and Kernel 2 (row_div reduce-and-apply). gfx950-only,
+// since the PartialRMS solution + row_div code object ship for gfx950.
 
 namespace
 {
@@ -737,22 +702,29 @@ namespace
         return out;
     }
 
-    void expectBf16RowMajorNear(const std::vector<uint16_t>& actual,
-                                const std::vector<float>&    expected)
+    void expectBf16Near(const std::vector<uint16_t>& actual,
+                        const std::vector<float>&    expected,
+                        float                        absTol = 5e-5f,
+                        float                        relTol = 5e-2f)
     {
         ASSERT_EQ(actual.size(), expected.size());
         size_t mismatches = 0;
+        double maxAbsErr  = 0.0;
         double maxRelErr  = 0.0;
         for(size_t i = 0; i < actual.size(); ++i)
         {
             const float  got   = bf16_to_f32(actual[i]);
-            const float  denom = std::max(std::abs(expected[i]), 1e-3f);
-            const double rel   = std::abs(got - expected[i]) / denom;
+            const float  ref   = expected[i];
+            const float  abs   = std::abs(got - ref);
+            const float  denom = std::max(std::abs(ref), 1e-3f);
+            const double rel   = abs / denom;
+            maxAbsErr          = std::max(maxAbsErr, static_cast<double>(abs));
             maxRelErr          = std::max(maxRelErr, rel);
-            if(rel > 5e-2)
+            if(abs > std::max(absTol, relTol * std::abs(ref)))
                 ++mismatches;
         }
-        EXPECT_EQ(mismatches, 0u) << "max relative error " << maxRelErr;
+        EXPECT_EQ(mismatches, 0u) << "max abs error " << maxAbsErr << ", max relative error "
+                                  << maxRelErr;
     }
 
     void runFullRmsNormE2E(bool residualAdd)
@@ -840,7 +812,7 @@ namespace
 
         ASSERT_EQ(hipMemcpy(hD.data(), dD, hD.size() * sizeof(uint16_t), hipMemcpyDeviceToHost),
                   hipSuccess);
-        expectBf16RowMajorNear(
+        expectBf16Near(
             hD, referenceRmsNormRows(hA, hB, hGamma, residualAdd ? &hResidual : nullptr, M, N, K, eps));
 
         hipblasLtFusedEpilogueDestroy(fused);
@@ -874,4 +846,272 @@ TEST(FusedEpilogueE2E, fullRmsNormResidualAddMatchesReference)
         GTEST_SKIP() << "fused RMSNorm (PartialRMS) is wired for gfx950 only";
 
     runFullRmsNormE2E(/*residualAdd=*/true);
+}
+
+// ---- End-to-end numeric test: decomposed RMSNorm consumer (Kernel 3 RstdScale) ----
+//
+// Exercises the decomposed flow's consumer stage in isolation: a GEMM2 with the
+// HIPBLASLT_FUSEABLE_EPILOGUE_RMSNORM_SCALE_APPLY epilogue multiplies each output row by a
+// pre-computed per-row rstd carried in the handoff descriptor (K3 RstdScale, normal
+// orientation, no reduction). This test injects a host-computed rstd into the opaque handoff via
+// a test-only hook so the consumer can be exercised independently of the producer. Verifies
+// D[m,n] = (alpha * op(A)*op(B))[m,n] * rstd[m]. gfx950-only.
+
+// Test-only hook (defined in amd_detail/hipblaslt.cpp) to populate the opaque RMSNorm handoff
+// descriptor with a caller-provided device rstd buffer.
+extern "C++" bool rocblaslt_rmsnorm_handoff_set_scale_for_testing(
+    hipblasLtFusedEpilogueRMSNormDescriptor_t desc, void* per_row_scale);
+
+namespace
+{
+    void createScaleApplyDescriptor(hipblasLtFusedEpilogueRMSNormDescriptor_t stats,
+                                    hipblasLtFusedEpilogueDescriptor_t*       fused)
+    {
+        ASSERT_EQ(hipblasLtFusedEpilogueCreate(fused), HIPBLAS_STATUS_SUCCESS);
+        ASSERT_EQ(hipblasLtFusedEpilogueAdd(*fused,
+                                            HIPBLASLT_FUSEABLE_EPILOGUE_RMSNORM_SCALE_APPLY),
+                  HIPBLAS_STATUS_SUCCESS);
+        ASSERT_EQ(hipblasLtFusedEpilogueSetAttribute(
+                      *fused, HIPBLASLT_FUSED_EPILOGUE_RMSNORM_STATS, &stats, sizeof(stats)),
+                  HIPBLAS_STATUS_SUCCESS);
+    }
+
+    void createPartialStatsDescriptor(hipblasLtFusedEpilogueRMSNormDescriptor_t stats,
+                                      void*                                     gamma,
+                                      float                                     eps,
+                                      hipblasLtFusedEpilogueDescriptor_t*       fused)
+    {
+        ASSERT_EQ(hipblasLtFusedEpilogueCreate(fused), HIPBLAS_STATUS_SUCCESS);
+        ASSERT_EQ(hipblasLtFusedEpilogueAdd(*fused,
+                                            HIPBLASLT_FUSEABLE_EPILOGUE_PARTIAL_RMSNORM_STATS),
+                  HIPBLAS_STATUS_SUCCESS);
+        ASSERT_EQ(hipblasLtFusedEpilogueSetAttribute(
+                      *fused, HIPBLASLT_FUSED_EPILOGUE_RMSNORM_GAMMA, &gamma, sizeof(gamma)),
+                  HIPBLAS_STATUS_SUCCESS);
+        ASSERT_EQ(hipblasLtFusedEpilogueSetAttribute(
+                      *fused, HIPBLASLT_FUSED_EPILOGUE_RMSNORM_EPS, &eps, sizeof(eps)),
+                  HIPBLAS_STATUS_SUCCESS);
+        ASSERT_EQ(hipblasLtFusedEpilogueSetAttribute(
+                      *fused, HIPBLASLT_FUSED_EPILOGUE_RMSNORM_STATS, &stats, sizeof(stats)),
+                  HIPBLAS_STATUS_SUCCESS);
+    }
+}
+
+TEST(FusedEpilogueE2E, decomposedScaleApplyMatchesReference)
+{
+    if(!deviceIsGfx950())
+        GTEST_SKIP() << "fused RMSNorm (RstdScale) is wired for gfx950 only";
+
+    // TN, bf16, col-major. K3 RstdScale library tiles are N_out=64 wide; K = N_hidden.
+    const int64_t M = 256, N = 64, K = 64;
+    const float   alpha = 1.0f;
+
+    std::vector<uint16_t> hA(static_cast<size_t>(K) * M);
+    std::vector<uint16_t> hB(static_cast<size_t>(K) * N);
+    std::vector<uint16_t> hD(static_cast<size_t>(M) * N, 0);
+    std::vector<float>    hRstd(static_cast<size_t>(M));
+
+    std::mt19937                          rng(321);
+    std::uniform_real_distribution<float> dist(-0.1f, 0.1f);
+    std::uniform_real_distribution<float> rdist(0.25f, 1.75f);
+    fillRandomBf16(hA, rng, dist);
+    fillRandomBf16(hB, rng, dist);
+    for(auto& r : hRstd)
+        r = rdist(rng); // arbitrary per-row scale standing in for the producer's rstd
+
+    void *dA = nullptr, *dB = nullptr, *dC = nullptr, *dD = nullptr, *dRstd = nullptr,
+         *dWs                = nullptr;
+    const size_t wsSize      = size_t(64) * 1024 * 1024;
+    ASSERT_EQ(hipMalloc(&dA, hA.size() * sizeof(uint16_t)), hipSuccess);
+    ASSERT_EQ(hipMalloc(&dB, hB.size() * sizeof(uint16_t)), hipSuccess);
+    ASSERT_EQ(hipMalloc(&dD, hD.size() * sizeof(uint16_t)), hipSuccess);
+    ASSERT_EQ(hipMalloc(&dRstd, hRstd.size() * sizeof(float)), hipSuccess);
+    ASSERT_EQ(hipMalloc(&dWs, wsSize), hipSuccess);
+    dC = dD;
+    ASSERT_EQ(hipMemcpy(dA, hA.data(), hA.size() * sizeof(uint16_t), hipMemcpyHostToDevice),
+              hipSuccess);
+    ASSERT_EQ(hipMemcpy(dB, hB.data(), hB.size() * sizeof(uint16_t), hipMemcpyHostToDevice),
+              hipSuccess);
+    ASSERT_EQ(hipMemcpy(dRstd, hRstd.data(), hRstd.size() * sizeof(float), hipMemcpyHostToDevice),
+              hipSuccess);
+    ASSERT_EQ(hipMemset(dD, 0, hD.size() * sizeof(uint16_t)), hipSuccess);
+
+    hipblasLtHandle_t handle = nullptr;
+    ASSERT_EQ(hipblasLtCreate(&handle), HIPBLAS_STATUS_SUCCESS);
+
+    // Decomposed handoff, populated with the host rstd via the test-only hook.
+    hipblasLtFusedEpilogueRMSNormDescriptor_t stats = nullptr;
+    ASSERT_EQ(hipblasLtFusedEpilogueRMSNormDescriptorCreate(&stats), HIPBLAS_STATUS_SUCCESS);
+    ASSERT_TRUE(rocblaslt_rmsnorm_handoff_set_scale_for_testing(stats, dRstd));
+
+    // Consumer chain: RMSNorm scale-apply reads the deferred per-row scale from the handoff.
+    hipblasLtFusedEpilogueDescriptor_t cons = nullptr;
+    ASSERT_NO_FATAL_FAILURE(createScaleApplyDescriptor(stats, &cons));
+
+    int algoCount = 0;
+    ASSERT_EQ(runBf16TnFusedMatmul(handle, M, N, K, dA, K, dB, dC, dD, cons, dWs, wsSize,
+                                   algoCount),
+              HIPBLAS_STATUS_SUCCESS);
+    ASSERT_GT(algoCount, 0) << "no RstdScale (K3) solution selected for the scale-apply problem";
+    ASSERT_EQ(hipDeviceSynchronize(), hipSuccess);
+    ASSERT_EQ(hipMemcpy(hD.data(), dD, hD.size() * sizeof(uint16_t), hipMemcpyDeviceToHost),
+              hipSuccess);
+
+    // Reference: D[m,n] = (alpha * sum_k A[k,m]*B[k,n]) * rstd[m]. K3 keeps the normal
+    // orientation (per-M-row scale, no reduction), so D is col-major [M, N].
+    std::vector<float> expected(static_cast<size_t>(M) * N);
+    for(int64_t m = 0; m < M; ++m)
+        for(int64_t n = 0; n < N; ++n)
+        {
+            float acc = 0.0f;
+            for(int64_t kk = 0; kk < K; ++kk)
+                acc += bf16_to_f32(hA[kk + m * K]) * bf16_to_f32(hB[kk + n * K]);
+            expected[n * M + m] = acc * alpha * hRstd[m]; // D col-major [M, N]
+        }
+    expectBf16Near(hD, expected);
+
+    hipblasLtFusedEpilogueDestroy(cons);
+    hipblasLtFusedEpilogueRMSNormDescriptorDestroy(stats);
+    hipblasLtDestroy(handle);
+    static_cast<void>(hipFree(dA));
+    static_cast<void>(hipFree(dB));
+    static_cast<void>(hipFree(dD));
+    static_cast<void>(hipFree(dRstd));
+    static_cast<void>(hipFree(dWs));
+}
+
+// ---- End-to-end: decomposed producer(GEMM1) -> consumer(GEMM2) two-call flow ----
+//
+// The full decomposed RMSNorm flow across two matmul calls linked by the library-populated
+// RMSNorm handoff descriptor (no test hook):
+//   GEMM1 (producer, PARTIAL_RMSNORM_STATS): h2 = (x @ W0) * gamma  [M, N_hidden]; the library
+//     runs K1 (PartialRMS) + row_rstd, stashing rstd = rsqrt(mean(h1^2)+eps) in the handoff.
+//   GEMM2 (consumer, RMSNORM_SCALE_APPLY):    y  = rstd * (h2 @ W1)  [M, N_out] via Kernel 3.
+// The combined result equals RMSNorm(x @ W0) @ W1. gamma=1 keeps the reference simple. TN bf16;
+// h2 is produced row-major [M, N_hidden] and fed to GEMM2 as its TN A operand (lda=N_hidden).
+// Needs a merged K1(PartialRMS)+K3(RstdScale) gfx950 library; gfx950-only.
+TEST(FusedEpilogueE2E, decomposedProducerConsumerMatchesReference)
+{
+    if(!deviceIsGfx950())
+        GTEST_SKIP() << "decomposed RMSNorm flow is wired for gfx950 only";
+
+    const int64_t M = 1024, Nhidden = 1024, K0 = 64, Nout = 64;
+    const float   eps = 1e-5f;
+
+    std::vector<uint16_t> hX(static_cast<size_t>(K0) * M);
+    std::vector<uint16_t> hW0(static_cast<size_t>(K0) * Nhidden);
+    std::vector<uint16_t> hW1(static_cast<size_t>(Nhidden) * Nout);
+    std::vector<uint16_t> hGamma(static_cast<size_t>(Nhidden), f32_to_bf16(1.0f)); // gamma = 1
+
+    std::mt19937                          rng(4242);
+    std::uniform_real_distribution<float> dist(-0.1f, 0.1f);
+    fillRandomBf16(hX, rng, dist);
+    fillRandomBf16(hW0, rng, dist);
+    fillRandomBf16(hW1, rng, dist);
+
+    void *dX = nullptr, *dW0 = nullptr, *dGamma = nullptr, *dH2 = nullptr, *dW1 = nullptr,
+         *dD2                = nullptr, *dWs = nullptr;
+    const size_t wsSize      = size_t(256) * 1024 * 1024;
+    ASSERT_EQ(hipMalloc(&dX, hX.size() * 2), hipSuccess);
+    ASSERT_EQ(hipMalloc(&dW0, hW0.size() * 2), hipSuccess);
+    ASSERT_EQ(hipMalloc(&dGamma, hGamma.size() * 2), hipSuccess);
+    ASSERT_EQ(hipMalloc(&dH2, size_t(M) * Nhidden * 2), hipSuccess);
+    ASSERT_EQ(hipMalloc(&dW1, hW1.size() * 2), hipSuccess);
+    ASSERT_EQ(hipMalloc(&dD2, size_t(M) * Nout * 2), hipSuccess);
+    ASSERT_EQ(hipMalloc(&dWs, wsSize), hipSuccess);
+    ASSERT_EQ(hipMemcpy(dX, hX.data(), hX.size() * 2, hipMemcpyHostToDevice), hipSuccess);
+    ASSERT_EQ(hipMemcpy(dW0, hW0.data(), hW0.size() * 2, hipMemcpyHostToDevice), hipSuccess);
+    ASSERT_EQ(hipMemcpy(dGamma, hGamma.data(), hGamma.size() * 2, hipMemcpyHostToDevice),
+              hipSuccess);
+    ASSERT_EQ(hipMemcpy(dW1, hW1.data(), hW1.size() * 2, hipMemcpyHostToDevice), hipSuccess);
+
+    hipblasLtHandle_t handle = nullptr;
+    ASSERT_EQ(hipblasLtCreate(&handle), HIPBLAS_STATUS_SUCCESS);
+
+    // Library-populated handoff shared by both calls (no test hook).
+    hipblasLtFusedEpilogueRMSNormDescriptor_t stats = nullptr;
+    ASSERT_EQ(hipblasLtFusedEpilogueRMSNormDescriptorCreate(&stats), HIPBLAS_STATUS_SUCCESS);
+
+    // Producer chain: partial RMSNorm stats + gamma + eps + handoff.
+    hipblasLtFusedEpilogueDescriptor_t prod = nullptr;
+    ASSERT_NO_FATAL_FAILURE(createPartialStatsDescriptor(stats, dGamma, eps, &prod));
+
+    // GEMM1 producer: h2 [M, N_hidden] (row-major) + rstd stashed in the handoff.
+    int algoCount = 0;
+    ASSERT_EQ(runBf16TnFusedMatmul(
+                  handle, M, Nhidden, K0, dX, K0, dW0, dH2, dH2, prod, dWs, wsSize, algoCount),
+              HIPBLAS_STATUS_SUCCESS);
+    ASSERT_GT(algoCount, 0) << "no PartialRMS (K1) producer solution selected";
+    ASSERT_EQ(hipDeviceSynchronize(), hipSuccess);
+
+    // Consumer chain: scale-apply + the same handoff.
+    hipblasLtFusedEpilogueDescriptor_t cons = nullptr;
+    ASSERT_NO_FATAL_FAILURE(createScaleApplyDescriptor(stats, &cons));
+
+    // GEMM2 consumer: h2 (row-major [M, N_hidden]) is the TN A operand [N_hidden, M] (lda=N_hidden).
+    ASSERT_EQ(runBf16TnFusedMatmul(handle,
+                                   M,
+                                   Nout,
+                                   Nhidden,
+                                   dH2,
+                                   Nhidden,
+                                   dW1,
+                                   dD2,
+                                   dD2,
+                                   cons,
+                                   dWs,
+                                   wsSize,
+                                   algoCount),
+              HIPBLAS_STATUS_SUCCESS);
+    ASSERT_GT(algoCount, 0) << "no RstdScale (K3) consumer solution selected";
+    ASSERT_EQ(hipDeviceSynchronize(), hipSuccess);
+
+    std::vector<uint16_t> hD2(static_cast<size_t>(M) * Nout);
+    ASSERT_EQ(hipMemcpy(hD2.data(), dD2, hD2.size() * 2, hipMemcpyDeviceToHost), hipSuccess);
+
+    // Reference: gemm1 = x@W0 (TN); rstd = rsqrt(mean(gemm1^2)+eps); y = rstd * (gemm1 @ W1).
+    std::vector<float> gemm1(static_cast<size_t>(M) * Nhidden);
+    std::vector<float> rstd(static_cast<size_t>(M));
+    for(int64_t m = 0; m < M; ++m)
+    {
+        float ss = 0.0f;
+        for(int64_t j = 0; j < Nhidden; ++j)
+        {
+            float acc = 0.0f;
+            for(int64_t k = 0; k < K0; ++k)
+                acc += bf16_to_f32(hX[k + m * K0]) * bf16_to_f32(hW0[k + j * K0]);
+            gemm1[m * Nhidden + j] = acc;
+            ss += acc * acc;
+        }
+        rstd[m] = 1.0f / std::sqrt(ss / static_cast<float>(Nhidden) + eps);
+    }
+    // Consumer reference. Mirror the device's bf16 storage: h2 = bf16(gemm1) (gamma=1) is stored
+    // by the producer, GEMM2 reads it, then y = bf16(rstd * (h2 @ W1)). Compare with a combined
+    // absolute+relative tolerance so near-zero cancellation elements (tiny ref) do not blow up a
+    // pure relative metric.
+    std::vector<float> expected(static_cast<size_t>(M) * Nout);
+    for(int64_t m = 0; m < M; ++m)
+        for(int64_t n = 0; n < Nout; ++n)
+        {
+            float acc = 0.0f;
+            for(int64_t j = 0; j < Nhidden; ++j)
+            {
+                const float h2bf = bf16_to_f32(f32_to_bf16(gemm1[m * Nhidden + j])); // gamma=1
+                acc += h2bf * bf16_to_f32(hW1[j + n * Nhidden]);
+            }
+            expected[n * M + m] = bf16_to_f32(f32_to_bf16(acc * rstd[m])); // D2 col-major
+        }
+    expectBf16Near(hD2, expected, 3e-2f);
+
+    hipblasLtFusedEpilogueDestroy(prod);
+    hipblasLtFusedEpilogueDestroy(cons);
+    hipblasLtFusedEpilogueRMSNormDescriptorDestroy(stats);
+    hipblasLtDestroy(handle);
+    static_cast<void>(hipFree(dX));
+    static_cast<void>(hipFree(dW0));
+    static_cast<void>(hipFree(dGamma));
+    static_cast<void>(hipFree(dH2));
+    static_cast<void>(hipFree(dW1));
+    static_cast<void>(hipFree(dD2));
+    static_cast<void>(hipFree(dWs));
 }

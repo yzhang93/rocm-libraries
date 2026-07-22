@@ -386,6 +386,9 @@ struct hipblasLtFusedEpilogueRMSNormDescriptor
     void* per_row_scale = nullptr;
     // Set after the producer reduction has populated per_row_scale.
     bool populated = false;
+    // True when the library allocated per_row_scale (producer path) and must free it on destroy.
+    // False when a caller/test provided the buffer via the test-only hook.
+    bool owns_scale = false;
 };
 
 // Definition of the opaque handle declared in hipblaslt.h. Owns the composed list of
@@ -505,6 +508,27 @@ extern "C++" bool rocblaslt_resolve_fused_epilogue(const hipblasLtFusedEpilogueD
     out.rmsnormEps     = desc->rmsnorm_eps;
     out.residual       = desc->residual;
     out.residualOutput = desc->residual_output;
+    if(desc->rmsnorm_stats != nullptr)
+    {
+        out.perRowScale       = desc->rmsnorm_stats->per_row_scale;
+        out.rmsStatsPopulated = desc->rmsnorm_stats->populated;
+    }
+    return true;
+}
+
+// Test-only: inject a caller-provided device rstd buffer into the decomposed handoff so the
+// consumer (Kernel 3 RstdScale) path can be exercised independently of the producer.
+// Not part of the public API.
+extern "C++" HIPBLASLT_EXPORT bool rocblaslt_rmsnorm_handoff_set_scale_for_testing(
+    hipblasLtFusedEpilogueRMSNormDescriptor* desc, void* per_row_scale)
+{
+    if(desc == nullptr)
+        return false;
+    if(desc->owns_scale && desc->per_row_scale != nullptr && desc->per_row_scale != per_row_scale)
+        static_cast<void>(hipFree(desc->per_row_scale));
+    desc->per_row_scale = per_row_scale;
+    desc->populated     = (per_row_scale != nullptr);
+    desc->owns_scale    = false;
     return true;
 }
 
@@ -671,6 +695,8 @@ hipblasStatus_t
     hipblasLtFusedEpilogueRMSNormDescriptorDestroy(hipblasLtFusedEpilogueRMSNormDescriptor_t desc)
 try
 {
+    if(desc != nullptr && desc->owns_scale && desc->per_row_scale != nullptr)
+        static_cast<void>(hipFree(desc->per_row_scale));
     delete desc;
     return HIPBLAS_STATUS_SUCCESS;
 }
@@ -913,12 +939,11 @@ try
     rocblaslt::Debug::Instance().markerStart("hipblasLtMatmul");
     hipblasStatus_t return_status = HIPBLAS_STATUS_SUCCESS;
 
-    // Fused-epilogue guard. The full RMSNorm flow (single-call producer K1 + reduce-and-apply
-    // Kernel 2) is wired for gfx950: it maps to the TensileLite PartialRMS solution and launches
-    // partial_rms_epilogue. Problems on other arches simply find no PartialRMS solution and fail
-    // at selection. The decomposed producer/consumer stages
-    // (PARTIAL_RMSNORM_STATS / RMSNORM_SCALE_APPLY) and other reserved components have no kernels
-    // yet, so keep rejecting them here with NOT_SUPPORTED before kernel selection/launch.
+    // Fused-epilogue guard. Wired for gfx950:
+    //   - full RMSNorm (single-call producer K1 + reduce-and-apply row_div),
+    //   - the decomposed producer (PARTIAL_RMSNORM_STATS / K1 + row_rstd reduce-and-return), and
+    //   - the decomposed consumer (RMSNORM_SCALE_APPLY / Kernel 3 RstdScale).
+    // Any other fused chain has no matching kernel yet, so reject with NOT_SUPPORTED before launch.
     if(auto* desc = (rocblaslt_matmul_desc)matmul_descr)
     {
         if(desc->fused_epilogue != nullptr)
@@ -926,15 +951,52 @@ try
             const auto* fused = desc->fused_epilogue;
             const bool  fullRmsNorm
                 = fused_epilogue_has_stage(fused, HIPBLASLT_FUSEABLE_EPILOGUE_RMSNORM);
-            const bool decomposed
-                = fused_epilogue_has_stage(fused,
-                                           HIPBLASLT_FUSEABLE_EPILOGUE_PARTIAL_RMSNORM_STATS)
-                  || fused_epilogue_has_stage(fused,
-                                              HIPBLASLT_FUSEABLE_EPILOGUE_RMSNORM_SCALE_APPLY);
-            if(!fullRmsNorm || decomposed)
+            const bool scaleApply
+                = fused_epilogue_has_stage(fused, HIPBLASLT_FUSEABLE_EPILOGUE_RMSNORM_SCALE_APPLY);
+            const bool partialStats
+                = fused_epilogue_has_stage(fused, HIPBLASLT_FUSEABLE_EPILOGUE_PARTIAL_RMSNORM_STATS);
+            if(!fullRmsNorm && !scaleApply && !partialStats)
             {
                 rocblaslt::Debug::Instance().markerStop();
                 return HIPBLAS_STATUS_NOT_SUPPORTED;
+            }
+            if(scaleApply
+               && (fused->rmsnorm_stats == nullptr || !fused->rmsnorm_stats->populated
+                   || fused->rmsnorm_stats->per_row_scale == nullptr))
+            {
+                rocblaslt::Debug::Instance().markerStop();
+                return HIPBLAS_STATUS_INVALID_VALUE;
+            }
+            // Decomposed producer: the library owns the per-row rstd handoff buffer. Allocate it
+            // (FP32 [rows*batch], rows rounded up so the consumer's padded rstd read stays in
+            // bounds) on the first producer call if the caller has not provided one; the producer's
+            // row_rstd reduction fills it and the consumer GEMM2 reads it. Freed on descriptor
+            // destroy.
+            if(partialStats && fused->rmsnorm_stats != nullptr
+               && fused->rmsnorm_stats->per_row_scale == nullptr)
+            {
+                auto*          dlay       = (rocblaslt_matrix_layout)matD;
+                const uint64_t rows       = dlay ? dlay->m : 0;
+                const int32_t  batch      = dlay ? dlay->batch_count : 1;
+                const uint64_t paddedRows = ((rows + 255) / 256) * 256;
+                void*          scale      = nullptr;
+                if(dlay == nullptr || paddedRows == 0 || batch <= 0)
+                {
+                    rocblaslt::Debug::Instance().markerStop();
+                    return HIPBLAS_STATUS_INVALID_VALUE;
+                }
+                if(hipMalloc(&scale, paddedRows * static_cast<size_t>(batch) * sizeof(float))
+                   == hipSuccess)
+                {
+                    fused->rmsnorm_stats->per_row_scale = scale;
+                    fused->rmsnorm_stats->populated     = true;
+                    fused->rmsnorm_stats->owns_scale    = true;
+                }
+                else
+                {
+                    rocblaslt::Debug::Instance().markerStop();
+                    return HIPBLAS_STATUS_ALLOC_FAILED;
+                }
             }
         }
     }

@@ -11,14 +11,18 @@
 # target baked into its .amdgcn_target directive, so we assemble it verbatim
 # (no code generation) and install one .co per matching arch.
 
-set(row_div_src "${CMAKE_CURRENT_SOURCE_DIR}/../../tensilelite/epilogues/kernels/row_div.s")
+# Fused-RMSNorm reduce kernels (both hand-written wave64 gfx950 kernels):
+#   row_div  - full-flow Kernel 2: reduce partials, compute rstd, apply to D in place.
+#   row_rstd - decomposed-flow producer Kernel 2: reduce partials, compute rstd, write it to
+#              the handoff buffer (no D apply) for the GEMM2 RstdScale consumer (Kernel 3).
+set(row_kernels row_div row_rstd)
 string(REGEX MATCHALL "gfx[a-z0-9]+" archs "${GPU_TARGETS}")
 list(REMOVE_DUPLICATES archs)
 
 set(previous_target "")
 
 foreach(arch IN LISTS archs)
-    # row_div is a wave64 (CDNA) kernel authored for gfx950; skip other arches.
+    # These are wave64 (CDNA) kernels authored for gfx950; skip other arches.
     if(NOT arch STREQUAL "gfx950")
         message(STATUS "hipblaslt device library row-div: skipping non-gfx950 arch ${arch}")
         continue()
@@ -27,40 +31,44 @@ foreach(arch IN LISTS archs)
     message(STATUS "hipblaslt device library row-div: configuring target for ${arch}")
     tensilelite_offload_target(offload_arch "${arch}")
 
-    add_library(row-div-obj-${arch} OBJECT)
-    target_compile_options(row-div-obj-${arch}
-        PRIVATE
-            -Wno-unused-command-line-argument -x assembler -target amdgcn-amd-amdhsa -mcode-object-version=4 -mcpu=${offload_arch} -mwavefrontsize64 -c
-    )
-    # Stage the committed .s into the build dir so the object rule has a local source.
-    add_custom_command(
-        OUTPUT
-            "${CMAKE_CURRENT_BINARY_DIR}/row_div_${arch}.s"
-        COMMAND ${CMAKE_COMMAND} -E copy "${row_div_src}" "${CMAKE_CURRENT_BINARY_DIR}/row_div_${arch}.s"
-        DEPENDS "${row_div_src}"
-        COMMENT "Staging row_div assembly for ${arch}"
-    )
-    target_sources(row-div-obj-${arch}
-        PRIVATE
-            "${CMAKE_CURRENT_BINARY_DIR}/row_div_${arch}.s"
-    )
+    foreach(kern IN LISTS row_kernels)
+        set(kern_src "${CMAKE_CURRENT_SOURCE_DIR}/../../tensilelite/epilogues/kernels/${kern}.s")
 
-    set(output_code_object_file "${CMAKE_CURRENT_BINARY_DIR}/row_div_${arch}.co")
-    add_custom_command(
-        DEPENDS row-div-obj-${arch}
-        OUTPUT "${output_code_object_file}"
-        COMMAND ${CMAKE_CXX_COMPILER};-target;amdgcn-amdhsa;-Xlinker;$<TARGET_OBJECTS:row-div-obj-${arch}>;-o;${output_code_object_file}
-        COMMENT "Creating row_div_${arch}.co"
-        COMMAND_EXPAND_LISTS
-    )
+        add_library(${kern}-obj-${arch} OBJECT)
+        target_compile_options(${kern}-obj-${arch}
+            PRIVATE
+                -Wno-unused-command-line-argument -x assembler -target amdgcn-amd-amdhsa -mcode-object-version=4 -mcpu=${offload_arch} -mwavefrontsize64 -c
+        )
+        # Stage the committed .s into the build dir so the object rule has a local source.
+        add_custom_command(
+            OUTPUT
+                "${CMAKE_CURRENT_BINARY_DIR}/${kern}_${arch}.s"
+            COMMAND ${CMAKE_COMMAND} -E copy "${kern_src}" "${CMAKE_CURRENT_BINARY_DIR}/${kern}_${arch}.s"
+            DEPENDS "${kern_src}"
+            COMMENT "Staging ${kern} assembly for ${arch}"
+        )
+        target_sources(${kern}-obj-${arch}
+            PRIVATE
+                "${CMAKE_CURRENT_BINARY_DIR}/${kern}_${arch}.s"
+        )
 
-    add_custom_target(row-div-library-${arch} ALL
-        DEPENDS
-            "${output_code_object_file}"
-            ${previous_target}
-        COMMAND ${CMAKE_COMMAND} -E make_directory "${HIPBLASLT_TENSILE_LIBPATH}/library/${arch}"
-        COMMAND ${CMAKE_COMMAND} -E copy "${output_code_object_file}" "${HIPBLASLT_TENSILE_LIBPATH}/library/${arch}"
-        COMMENT "Installing row_div_${arch}.co"
-    )
-    set(previous_target "row-div-library-${arch}")
+        set(output_code_object_file "${CMAKE_CURRENT_BINARY_DIR}/${kern}_${arch}.co")
+        add_custom_command(
+            DEPENDS ${kern}-obj-${arch}
+            OUTPUT "${output_code_object_file}"
+            COMMAND ${CMAKE_CXX_COMPILER};-target;amdgcn-amdhsa;-Xlinker;$<TARGET_OBJECTS:${kern}-obj-${arch}>;-o;${output_code_object_file}
+            COMMENT "Creating ${kern}_${arch}.co"
+            COMMAND_EXPAND_LISTS
+        )
+
+        add_custom_target(${kern}-library-${arch} ALL
+            DEPENDS
+                "${output_code_object_file}"
+                ${previous_target}
+            COMMAND ${CMAKE_COMMAND} -E make_directory "${HIPBLASLT_TENSILE_LIBPATH}/library/${arch}"
+            COMMAND ${CMAKE_COMMAND} -E copy "${output_code_object_file}" "${HIPBLASLT_TENSILE_LIBPATH}/library/${arch}"
+            COMMENT "Installing ${kern}_${arch}.co"
+        )
+        set(previous_target "${kern}-library-${arch}")
+    endforeach()
 endforeach()

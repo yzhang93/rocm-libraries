@@ -1846,7 +1846,12 @@ namespace
     static bool partialRMSNeedsTranspose(const RocblasltContractionProblem& p)
     {
         RocblasltFusedEpilogueInfo fInfo;
-        return rocblaslt_resolve_fused_epilogue(p.fused_epilogue, fInfo) && fInfo.hasRMSNorm;
+        // Both the full RMSNorm flow and the decomposed producer (partial stats) run the K1
+        // PartialRMS GEMM, which reduces over free0 -> the problem must be transposed so
+        // free0 = N_hidden. The decomposed consumer (scale-apply / K3) does NOT reduce and
+        // keeps the normal orientation, so it is excluded here.
+        return rocblaslt_resolve_fused_epilogue(p.fused_epilogue, fInfo)
+               && (fInfo.hasRMSNorm || fInfo.hasPartialRMSStats);
     }
 
     static hipblasOperation_t flipTransOp(hipblasOperation_t op)
@@ -2167,22 +2172,22 @@ namespace
         tensileProblem.setParams().setStreamKTileSchedulingMode(prob.streamk_tile_scheduling_ext);
         tensileProblem.setParams().setSmCountTarget(prob.sm_count_target);
 
-        // Fused RMSNorm epilogue (full flow): translate the attached composable fused-epilogue
-        // chain into the TensileLite PartialRMS problem flags so solution selection matches the
-        // fused-RMSNorm (PartialRMS) kernels. The single RMSNorm stage drives the full flow; the
-        // decomposed producer/consumer stages are wired separately. gamma/partialBuf/residual
-        // pointers and the partialBuf workspace carve are handled on the launch path. This stays
-        // dormant until the HIPBLASLT_MATMUL_DESC_FUSED_EPILOGUE NOT_SUPPORTED gate in
-        // amd_detail/hipblaslt.cpp is lifted (after Kernel 2 lands). See
-        // docs/design/fused_epilogue_rmsnorm.md.
+        // Fused RMSNorm epilogue: translate the attached composable fused-epilogue chain into
+        // the TensileLite selector flags. Full RMSNorm and the decomposed producer use the K1
+        // PartialRMS path; the decomposed consumer selects the K3 RstdScale path.
         RocblasltFusedEpilogueInfo fusedInfo;
         if(rocblaslt_resolve_fused_epilogue(prob.fused_epilogue, fusedInfo))
         {
-            if(fusedInfo.hasRMSNorm)
+            // Full RMSNorm flow and the decomposed producer (partial stats) both run K1.
+            if(fusedInfo.hasRMSNorm || fusedInfo.hasPartialRMSStats)
             {
                 tensileProblem.setUsePartialRMS(true);
                 tensileProblem.setPartialRMSResidualAdd(fusedInfo.hasResidualAdd);
             }
+            // Decomposed consumer (Kernel 3 RstdScale): applies a per-row rstd to GEMM2's
+            // output. Normal orientation (per-M-row scale, no reduction) -> no transpose.
+            if(fusedInfo.hasRMSNormScaleApply)
+                tensileProblem.setUseRstdScale(true);
         }
 
         // set AmaxD
@@ -2456,11 +2461,15 @@ namespace
         // every call). Without this, selection would route the fused problem to a normal solution.
         {
             RocblasltFusedEpilogueInfo fusedInfo;
-            if(rocblaslt_resolve_fused_epilogue(prob.fused_epilogue, fusedInfo)
-               && fusedInfo.hasRMSNorm)
+            if(rocblaslt_resolve_fused_epilogue(prob.fused_epilogue, fusedInfo))
             {
-                tensileProblem.setUsePartialRMS(true);
-                tensileProblem.setPartialRMSResidualAdd(fusedInfo.hasResidualAdd);
+                if(fusedInfo.hasRMSNorm || fusedInfo.hasPartialRMSStats)
+                {
+                    tensileProblem.setUsePartialRMS(true);
+                    tensileProblem.setPartialRMSResidualAdd(fusedInfo.hasResidualAdd);
+                }
+                if(fusedInfo.hasRMSNormScaleApply)
+                    tensileProblem.setUseRstdScale(true);
             }
         }
 
@@ -2582,6 +2591,9 @@ namespace
         {
             inputs.rmsGamma = fusedInputs.rmsnormGamma;
             inputs.residual = fusedInputs.residual;
+            // Decomposed consumer (Kernel 3 RstdScale): per-row rstd from the handoff descriptor.
+            if(fusedInputs.hasRMSNormScaleApply)
+                inputs.rstdBuf = fusedInputs.perRowScale;
         }
 
         // set bias vector
@@ -3404,11 +3416,10 @@ bool useRocRoller(rocblaslt_handle handle, const RocblasltContractionProblem& pr
 #endif
 
 /******************************************************************************
- * Fused-RMSNorm "Kernel 2" (reduce-and-apply). Host-launched companion to the *
- * TensileLite PartialRMS GEMM (K1): reduces K1's per-tile partial sums-of-     *
- * squares and applies the per-row RMSNorm scale to D in place. The code object *
- * partial_rms_epilogue_<arch>.co is shipped by device-library/partial-rms and  *
- * loaded like the matrix-transform kernel (single hard-coded kernel name).     *
+ * Fused-RMSNorm "Kernel 2" reductions. Host-launched companions to the         *
+ * TensileLite PartialRMS GEMM (K1): row_div applies the per-row RMSNorm scale  *
+ * to D in place for the full flow, while row_rstd writes the per-row scale to  *
+ * the decomposed handoff buffer for the later K3 RstdScale consumer.           *
  ******************************************************************************/
 namespace
 {
@@ -3435,6 +3446,22 @@ namespace
         static const std::string name = [] {
             auto path = partialRmsCodeObjectPath();
             return path ? path->filename().string() : std::string{};
+        }();
+        return name;
+    }
+
+    // Decomposed-flow producer reduction (row_rstd), shipped in the same library dir as row_div.
+    const std::string& rowRstdCodeObjectFileName()
+    {
+        static const std::string name = [] {
+            auto path = partialRmsCodeObjectPath(); // .../row_div_<arch>.co
+            if(!path)
+                return std::string{};
+            std::string fn  = path->filename().string();
+            auto        pos = fn.find("row_div_");
+            if(pos != std::string::npos)
+                fn.replace(pos, std::string("row_div_").size(), "row_rstd_");
+            return fn;
         }();
         return name;
     }
@@ -3510,6 +3537,43 @@ namespace
                                                  {block, 1, 1},
                                                  {tokensM, nSplit, 1},
                                                  {tokensM * block, nSplit, 1},
+                                                 0,
+                                                 kArgs};
+        return partialRmsAdapter().launchKernel(invocation, stream, nullptr, nullptr);
+    }
+
+    // Launch row_rstd (decomposed-flow producer Kernel 2) after K1: reduce the per-tile partials
+    // for each token row and WRITE the finalized rstd (no D apply) into rstdOut[token]. One
+    // workgroup per row. Kernarg layout matches launchRowDiv but arg0 is the rstd output buffer.
+    hipError_t launchRowRstd(void*       rstdOut,
+                             void*       partialBuf,
+                             uint32_t    tokensM,
+                             uint32_t    nHidden,
+                             uint32_t    nD,
+                             float       eps,
+                             hipStream_t stream)
+    {
+        constexpr uint32_t RD_BLOCK = 128;
+        constexpr uint32_t block    = 64;
+        const float        invD     = nHidden ? (1.0f / static_cast<float>(nHidden)) : 0.0f;
+
+        TensileLite::KernelArguments kArgs(false);
+        kArgs.appendAligned("rstdOut", rstdOut);
+        kArgs.appendAligned("partialBuf", partialBuf);
+        kArgs.appendAligned("pad", static_cast<uint32_t>(0));
+        kArgs.appendAligned("n", nHidden);
+        kArgs.appendAligned("n_c", RD_BLOCK);
+        kArgs.appendAligned("n_d", nD);
+        kArgs.appendAligned("inv_d", invD);
+        kArgs.appendAligned("eps", eps);
+
+        TensileLite::KernelInvocation invocation{"row_rstd",
+                                                 rowRstdCodeObjectFileName(),
+                                                 false,
+                                                 {1, 1, 1},
+                                                 {block, 1, 1},
+                                                 {tokensM, 1, 1},
+                                                 {tokensM * block, 1, 1},
                                                  0,
                                                  kArgs};
         return partialRmsAdapter().launchKernel(invocation, stream, nullptr, nullptr);
@@ -3696,9 +3760,11 @@ rocblaslt_status runContractionProblem(rocblaslt_handle                   handle
             // tail (after any GSU/StreamK region) so K1 can write it, and gather the values
             // Kernel 2 needs. inputs.partialBuf must be set on the inputs handed to solve() so
             // K1's arg-pack (ContractionSolution::singleCallArgs) receives a valid pointer.
-            void*    partialRmsBuf     = nullptr;
-            uint32_t partialRmsNTilesN = 0;
-            float    partialRmsEps     = 0.f;
+            void*    partialRmsBuf      = nullptr;
+            uint32_t partialRmsNTilesN  = 0;
+            float    partialRmsEps      = 0.f;
+            bool     partialRmsProducer = false;   // decomposed producer: write rstd, don't apply
+            void*    partialRmsRstdOut  = nullptr; // handoff per_row_scale (producer write target)
             if(solution->sizeMapping.partialRMS)
             {
                 // row_div (Kernel 2) processes N_hidden in RD_BLOCK(=128)-column strips.
@@ -3720,7 +3786,11 @@ rocblaslt_status runContractionProblem(rocblaslt_handle                   handle
 
                 RocblasltFusedEpilogueInfo fInfo;
                 if(rocblaslt_resolve_fused_epilogue(prob.fused_epilogue, fInfo))
-                    partialRmsEps = fInfo.rmsnormEps;
+                {
+                    partialRmsEps      = fInfo.rmsnormEps;
+                    partialRmsProducer = fInfo.hasPartialRMSStats;
+                    partialRmsRstdOut  = const_cast<void*>(fInfo.perRowScale);
+                }
             }
 
             auto tensileInputs = GetTensileInputs(prob);
@@ -3761,20 +3831,41 @@ rocblaslt_status runContractionProblem(rocblaslt_handle                   handle
             status = hip2RocStatus(
                 adapter->launchKernels(kernels, prob.stream, nullptr, nullptr, isPreloaded));
 
-            // Fused RMSNorm full flow (G3): after K1 (GEMM + partial-stats producer) completes,
-            // launch Kernel 2 on the same stream to reduce partialBuf and apply the per-row
-            // RMSNorm scale to D in place.
+            // After K1 (GEMM + partial-stats producer) completes, launch Kernel 2 on the same
+            // stream (ordered). Full flow -> row_div reduces and applies rstd to D in place.
+            // Decomposed producer (partial stats) -> row_rstd reduces and writes the per-row rstd
+            // into the handoff buffer for the later GEMM2 RstdScale consumer (Kernel 3).
             if(status == rocblaslt_status_success && solution->sizeMapping.partialRMS
                && partialRmsBuf != nullptr)
             {
-                status = hip2RocStatus(
-                    launchRowDiv(reinterpret_cast<void*>(prob.D),
-                                 partialRmsBuf,
-                                 static_cast<uint32_t>(prob.m), // tokens
-                                 static_cast<uint32_t>(prob.n), // N_hidden
-                                 partialRmsNTilesN,             // nD
-                                 partialRmsEps,
-                                 prob.stream));
+                if(partialRmsProducer)
+                {
+                    if(partialRmsRstdOut == nullptr)
+                    {
+                        log_error(__func__,
+                                  "decomposed RMSNorm producer: handoff per-row-scale buffer is "
+                                  "not set");
+                        return rocblaslt_status_invalid_value;
+                    }
+                    status = hip2RocStatus(launchRowRstd(partialRmsRstdOut,
+                                                         partialRmsBuf,
+                                                         static_cast<uint32_t>(prob.m), // tokens
+                                                         static_cast<uint32_t>(prob.n), // N_hidden
+                                                         partialRmsNTilesN,             // nD
+                                                         partialRmsEps,
+                                                         prob.stream));
+                }
+                else
+                {
+                    status = hip2RocStatus(
+                        launchRowDiv(reinterpret_cast<void*>(prob.D),
+                                     partialRmsBuf,
+                                     static_cast<uint32_t>(prob.m), // tokens
+                                     static_cast<uint32_t>(prob.n), // N_hidden
+                                     partialRmsNTilesN,             // nD
+                                     partialRmsEps,
+                                     prob.stream));
+                }
             }
 
             if(rocblaslt::Debug::Instance().printLogAsMarker())
