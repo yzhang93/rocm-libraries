@@ -12,10 +12,11 @@
 # (no code generation) and install one .co per matching arch.
 
 # Fused-RMSNorm reduce kernels (both hand-written wave64 gfx950 kernels):
-#   row_div  - full-flow Kernel 2: reduce partials, compute rstd, apply to D in place.
-#   row_rstd - decomposed-flow producer Kernel 2: reduce partials, compute rstd, write it to
-#              the handoff buffer (no D apply) for the GEMM2 RstdScale consumer (Kernel 3).
-set(row_kernels row_div row_rstd)
+#   row_div       - full-flow Kernel 2: reduce partials, compute rstd, apply to D in place.
+#   row_rstd      - decomposed-flow producer Kernel 2: reduce partials, compute rstd, write it to
+#                   the handoff buffer (no D apply) for the GEMM2 RstdScale consumer (Kernel 3).
+#   row_div_quant - full-flow Kernel 2: reduce partials, apply rstd, and quantize to FP8.
+set(row_kernels row_div row_rstd row_div_quant)
 string(REGEX MATCHALL "gfx[a-z0-9]+" archs "${GPU_TARGETS}")
 list(REMOVE_DUPLICATES archs)
 

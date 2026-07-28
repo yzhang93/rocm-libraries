@@ -1854,6 +1854,13 @@ namespace
                && (fInfo.hasRMSNorm || fInfo.hasPartialRMSStats);
     }
 
+    static bool partialRMSFullRequant(const RocblasltContractionProblem& p)
+    {
+        RocblasltFusedEpilogueInfo fInfo;
+        return rocblaslt_resolve_fused_epilogue(p.fused_epilogue, fInfo) && fInfo.hasRMSNorm
+               && fInfo.hasRequant;
+    }
+
     static hipblasOperation_t flipTransOp(hipblasOperation_t op)
     {
         return op == HIPBLAS_OP_N ? HIPBLAS_OP_T : HIPBLAS_OP_N;
@@ -1881,6 +1888,15 @@ namespace
         // C/D become [N_hidden, M] contiguous col-major (ld = N_hidden) == row-major [M, N_hidden].
         t.row_stride_c = 1; t.col_stride_c = p.n;
         t.row_stride_d = 1; t.col_stride_d = p.n;
+        if(partialRMSFullRequant(p))
+        {
+            if(p.a_type != HIP_R_16BF || p.b_type != HIP_R_16BF)
+                return t;
+            // K1 PartialRMS solutions are BF16. The user-visible D remains FP8; launch-time
+            // inputs redirect K1 C/D to a BF16 workspace scratch and row_div_quant writes final D.
+            t.c_type = HIP_R_16BF;
+            t.d_type = HIP_R_16BF;
+        }
         return t;
     }
 
@@ -2055,7 +2071,7 @@ namespace
             get_scalar_value_from_void_ptr(prob.beta, alphaBetaType));
 
         // Add problem predicates for CEqualsD
-        tensileProblem.setCEqualsD(prob.C == prob.D);
+        tensileProblem.setCEqualsD(partialRMSFullRequant(probIn) ? true : prob.C == prob.D);
 
         if(is_e_enabled(prob.epilogue))
         {
@@ -2352,7 +2368,7 @@ namespace
             get_scalar_value_from_void_ptr(prob.beta, alphaBetaType));
 
         // Add problem predicates for CEqualsD
-        tensileProblem.setCEqualsD(prob.C == prob.D);
+        tensileProblem.setCEqualsD(partialRMSFullRequant(probIn) ? true : prob.C == prob.D);
 
         auto tensileAct = getTensileActivationType(prob.epilogue);
 
@@ -3466,6 +3482,21 @@ namespace
         return name;
     }
 
+    const std::string& rowDivQuantCodeObjectFileName()
+    {
+        static const std::string name = [] {
+            auto path = partialRmsCodeObjectPath(); // .../row_div_<arch>.co
+            if(!path)
+                return std::string{};
+            std::string fn  = path->filename().string();
+            auto        pos = fn.find("row_div_");
+            if(pos != std::string::npos)
+                fn.replace(pos, std::string("row_div_").size(), "row_div_quant_");
+            return fn;
+        }();
+        return name;
+    }
+
     // One persistent adapter per device, with the code-object dir set once (mirrors
     // rocblaslt_transform.cpp::transformAdapter).
     TensileLite::hip::SolutionAdapter& partialRmsAdapter()
@@ -3574,6 +3605,47 @@ namespace
                                                  {block, 1, 1},
                                                  {tokensM, 1, 1},
                                                  {tokensM * block, 1, 1},
+                                                 0,
+                                                 kArgs};
+        return partialRmsAdapter().launchKernel(invocation, stream, nullptr, nullptr);
+    }
+
+    hipError_t launchRowDivQuant(void*       cBf16,
+                                 void*       partialBuf,
+                                 void*       outFp8,
+                                 void*       outBf16,
+                                 float       scale,
+                                 uint32_t    tokensM,
+                                 uint32_t    nHidden,
+                                 uint32_t    nD,
+                                 float       eps,
+                                 hipStream_t stream)
+    {
+        constexpr uint32_t RD_QUANT_BLOCK = 1024;
+        constexpr uint32_t block          = 128;
+        const float        invD           = nHidden ? (1.0f / static_cast<float>(nHidden)) : 0.0f;
+        const uint32_t     nSplit         = (nHidden + RD_QUANT_BLOCK - 1) / RD_QUANT_BLOCK;
+
+        TensileLite::KernelArguments kArgs(false);
+        kArgs.appendAligned("C", cBf16);
+        kArgs.appendAligned("D", partialBuf);
+        kArgs.appendAligned("out_fp8", outFp8);
+        kArgs.appendAligned("out_bf16", outBf16);
+        kArgs.appendAligned("scale", scale);
+        kArgs.appendAligned("m", tokensM);
+        kArgs.appendAligned("n", nHidden);
+        kArgs.appendAligned("n_c", RD_QUANT_BLOCK);
+        kArgs.appendAligned("n_d", nD);
+        kArgs.appendAligned("inv_d", invD);
+        kArgs.appendAligned("eps", eps);
+
+        TensileLite::KernelInvocation invocation{"row_div_quant",
+                                                 rowDivQuantCodeObjectFileName(),
+                                                 false,
+                                                 {1, 1, 1},
+                                                 {block, 1, 1},
+                                                 {tokensM, nSplit, 1},
+                                                 {tokensM * block, nSplit, 1},
                                                  0,
                                                  kArgs};
         return partialRmsAdapter().launchKernel(invocation, stream, nullptr, nullptr);
@@ -3765,6 +3837,9 @@ rocblaslt_status runContractionProblem(rocblaslt_handle                   handle
             float    partialRmsEps      = 0.f;
             bool     partialRmsProducer = false;   // decomposed producer: write rstd, don't apply
             void*    partialRmsRstdOut  = nullptr; // handoff per_row_scale (producer write target)
+            bool     partialRmsQuant    = false;   // full flow: row_div_quant writes FP8 D
+            void*    partialRmsQuantBf16 = nullptr;
+            float    partialRmsQuantScale = 1.0f;
             if(solution->sizeMapping.partialRMS)
             {
                 // row_div (Kernel 2) processes N_hidden in RD_BLOCK(=128)-column strips.
@@ -3790,12 +3865,58 @@ rocblaslt_status runContractionProblem(rocblaslt_handle                   handle
                     partialRmsEps      = fInfo.rmsnormEps;
                     partialRmsProducer = fInfo.hasPartialRMSStats;
                     partialRmsRstdOut  = const_cast<void*>(fInfo.perRowScale);
+                    partialRmsQuant    = fInfo.hasRMSNorm && fInfo.hasRequant;
+                    if(partialRmsQuant)
+                    {
+                        if(prob.a_type != HIP_R_16BF || prob.b_type != HIP_R_16BF)
+                        {
+                            log_error(__func__,
+                                      "full RMSNorm requant requires FP8 PartialRMS K1 logic "
+                                      "for FP8 A/B inputs");
+                            return rocblaslt_status_not_implemented;
+                        }
+                        if(fInfo.requantScale == nullptr
+                           || fInfo.requantComputeMode != HIPBLASLT_REQUANT_SCALE_STATIC
+                           || fInfo.requantGranularity != HIPBLASLT_REQUANT_SCALE_PER_TENSOR)
+                        {
+                            log_error(__func__,
+                                      "full RMSNorm requant currently requires static "
+                                      "per-tensor scale");
+                            return rocblaslt_status_not_implemented;
+                        }
+
+                        const size_t scratchBytes = static_cast<size_t>(prob.m) * prob.n
+                                                    * std::max<size_t>(prob.batch_count, 1)
+                                                    * sizeof(uint16_t);
+                        if(prob.workspace == nullptr || prob.workspaceSize < total + scratchBytes)
+                        {
+                            log_error(__func__,
+                                      "full RMSNorm requant requires extra BF16 workspace");
+                            return rocblaslt_status_invalid_size;
+                        }
+                        partialRmsQuantBf16 = static_cast<uint8_t*>(prob.workspace) + total;
+                        if(hipMemcpy(&partialRmsQuantScale,
+                                     fInfo.requantScale,
+                                     sizeof(float),
+                                     hipMemcpyDeviceToHost)
+                           != hipSuccess)
+                            return rocblaslt_status_internal_error;
+                    }
                 }
             }
 
             auto tensileInputs = GetTensileInputs(prob);
             if(solution->sizeMapping.partialRMS)
+            {
                 tensileInputs.partialBuf = partialRmsBuf;
+                if(partialRmsQuant)
+                {
+                    tensileInputs.c      = partialRmsQuantBf16;
+                    tensileInputs.d      = partialRmsQuantBf16;
+                    tensileInputs.batchC = nullptr;
+                    tensileInputs.batchD = nullptr;
+                }
+            }
             auto kernels = solution->solve(data->problem, tensileInputs, *hardware);
             // Remove this after supports getting comgr buffers from hip.
             bool isPreloaded = false;
@@ -3857,14 +3978,31 @@ rocblaslt_status runContractionProblem(rocblaslt_handle                   handle
                 }
                 else
                 {
-                    status = hip2RocStatus(
-                        launchRowDiv(reinterpret_cast<void*>(prob.D),
-                                     partialRmsBuf,
-                                     static_cast<uint32_t>(prob.m), // tokens
-                                     static_cast<uint32_t>(prob.n), // N_hidden
-                                     partialRmsNTilesN,             // nD
-                                     partialRmsEps,
-                                     prob.stream));
+                    if(partialRmsQuant)
+                    {
+                        status = hip2RocStatus(
+                            launchRowDivQuant(partialRmsQuantBf16,
+                                              partialRmsBuf,
+                                              reinterpret_cast<void*>(prob.D),
+                                              partialRmsQuantBf16,
+                                              partialRmsQuantScale,
+                                              static_cast<uint32_t>(prob.m), // tokens
+                                              static_cast<uint32_t>(prob.n), // N_hidden
+                                              partialRmsNTilesN,             // nD
+                                              partialRmsEps,
+                                              prob.stream));
+                    }
+                    else
+                    {
+                        status = hip2RocStatus(
+                            launchRowDiv(reinterpret_cast<void*>(prob.D),
+                                         partialRmsBuf,
+                                         static_cast<uint32_t>(prob.m), // tokens
+                                         static_cast<uint32_t>(prob.n), // N_hidden
+                                         partialRmsNTilesN,             // nD
+                                         partialRmsEps,
+                                         prob.stream));
+                    }
                 }
             }
 

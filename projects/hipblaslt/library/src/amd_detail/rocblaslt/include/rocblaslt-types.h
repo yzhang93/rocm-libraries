@@ -686,10 +686,15 @@ struct RocblasltFusedEpilogueInfo
     bool        hasPartialRMSStats   = false; // decomposed producer (GEMM1)
     bool        hasRMSNormScaleApply = false; // decomposed consumer (GEMM2)
     bool        hasResidualAdd       = false;
+    bool        hasRequant           = false;
     const void* rmsnormGamma         = nullptr;
     float       rmsnormEps           = 0.f;
     const void* residual             = nullptr;
     const void* residualOutput       = nullptr;
+    const void* requantScale         = nullptr;
+    const void* requantAmax          = nullptr;
+    hipblasLtRequantScaleComputeMode_t requantComputeMode = HIPBLASLT_REQUANT_SCALE_STATIC;
+    hipblasLtRequantScaleGranularity_t requantGranularity = HIPBLASLT_REQUANT_SCALE_PER_TENSOR;
     // Decomposed flow: the per-row rstd carried in the handoff descriptor. The producer
     // (partial stats) reduction writes it; the consumer (RMSNorm scale-apply / K3) reads it.
     const void* perRowScale          = nullptr;

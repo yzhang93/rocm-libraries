@@ -505,10 +505,15 @@ extern "C++" bool rocblaslt_resolve_fused_epilogue(const hipblasLtFusedEpilogueD
         = fused_epilogue_has_stage(desc, HIPBLASLT_FUSEABLE_EPILOGUE_PARTIAL_RMSNORM_STATS);
     out.hasRMSNormScaleApply
         = fused_epilogue_has_stage(desc, HIPBLASLT_FUSEABLE_EPILOGUE_RMSNORM_SCALE_APPLY);
+    out.hasRequant = fused_epilogue_has_stage(desc, HIPBLASLT_FUSEABLE_EPILOGUE_REQUANT);
     out.rmsnormGamma   = desc->rmsnorm_gamma;
     out.rmsnormEps     = desc->rmsnorm_eps;
     out.residual       = desc->residual;
     out.residualOutput = desc->residual_output;
+    out.requantScale       = desc->requant_scale;
+    out.requantAmax        = desc->requant_amax;
+    out.requantComputeMode = desc->requant_compute_mode;
+    out.requantGranularity = desc->requant_granularity;
     if(desc->rmsnorm_stats != nullptr)
     {
         out.perRowScale       = desc->rmsnorm_stats->per_row_scale;
@@ -967,10 +972,23 @@ try
                 = fused_epilogue_has_stage(fused, HIPBLASLT_FUSEABLE_EPILOGUE_RMSNORM_SCALE_APPLY);
             const bool partialStats
                 = fused_epilogue_has_stage(fused, HIPBLASLT_FUSEABLE_EPILOGUE_PARTIAL_RMSNORM_STATS);
+            const bool requant
+                = fused_epilogue_has_stage(fused, HIPBLASLT_FUSEABLE_EPILOGUE_REQUANT);
             if(!fullRmsNorm && !scaleApply && !partialStats)
             {
                 rocblaslt::Debug::Instance().markerStop();
                 return HIPBLAS_STATUS_NOT_SUPPORTED;
+            }
+            if(fullRmsNorm && requant)
+            {
+                const auto* aLayout = (rocblaslt_matrix_layout)matA;
+                const auto* bLayout = (rocblaslt_matrix_layout)matB;
+                if(aLayout == nullptr || bLayout == nullptr || aLayout->type != HIP_R_16BF
+                   || bLayout->type != HIP_R_16BF)
+                {
+                    rocblaslt::Debug::Instance().markerStop();
+                    return HIPBLAS_STATUS_NOT_SUPPORTED;
+                }
             }
             if(scaleApply
                && (fused->rmsnorm_stats == nullptr || !fused->rmsnorm_stats->populated

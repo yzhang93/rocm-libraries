@@ -739,6 +739,76 @@ namespace
         return status;
     }
 
+    hipblasStatus_t runBf16TnFusedMatmulFp8D(hipblasLtHandle_t                   handle,
+                                             int64_t                            m,
+                                             int64_t                            n,
+                                             int64_t                            k,
+                                             void*                              dA,
+                                             int64_t                            lda,
+                                             void*                              dB,
+                                             void*                              dC,
+                                             void*                              dD,
+                                             hipblasLtFusedEpilogueDescriptor_t fused,
+                                             void*                              dWorkspace,
+                                             size_t                             workspaceSize,
+                                             int&                               algoCount)
+    {
+        algoCount = 0;
+
+        hipblasLtMatrixLayout_t layA = nullptr, layB = nullptr, layC = nullptr, layD = nullptr;
+        hipblasLtMatrixLayoutCreate(&layA, HIP_R_16BF, k, m, lda);
+        hipblasLtMatrixLayoutCreate(&layB, HIP_R_16BF, k, n, k);
+        hipblasLtMatrixLayoutCreate(&layC, HIP_R_8F_E4M3, m, n, m);
+        hipblasLtMatrixLayoutCreate(&layD, HIP_R_8F_E4M3, m, n, m);
+
+        hipblasLtMatmulDesc_t mm = nullptr;
+        hipblasLtMatmulDescCreate(&mm, HIPBLAS_COMPUTE_32F, HIP_R_32F);
+        const hipblasOperation_t opT = HIPBLAS_OP_T, opN = HIPBLAS_OP_N;
+        hipblasLtMatmulDescSetAttribute(mm, HIPBLASLT_MATMUL_DESC_TRANSA, &opT, sizeof(opT));
+        hipblasLtMatmulDescSetAttribute(mm, HIPBLASLT_MATMUL_DESC_TRANSB, &opN, sizeof(opN));
+        hipblasLtMatmulDescSetAttribute(
+            mm, HIPBLASLT_MATMUL_DESC_FUSED_EPILOGUE, &fused, sizeof(fused));
+
+        hipblasLtMatmulPreference_t pref = nullptr;
+        hipblasLtMatmulPreferenceCreate(&pref);
+        hipblasLtMatmulPreferenceSetAttribute(
+            pref, HIPBLASLT_MATMUL_PREF_MAX_WORKSPACE_BYTES, &workspaceSize, sizeof(workspaceSize));
+
+        hipblasLtMatmulHeuristicResult_t heur[1];
+        hipblasLtMatmulAlgoGetHeuristic(
+            handle, mm, layA, layB, layC, layD, pref, 1, heur, &algoCount);
+
+        const float     alpha = 1.0f, beta = 0.0f;
+        hipblasStatus_t status = HIPBLAS_STATUS_SUCCESS;
+        if(algoCount > 0)
+        {
+            status = hipblasLtMatmul(handle,
+                                     mm,
+                                     &alpha,
+                                     dA,
+                                     layA,
+                                     dB,
+                                     layB,
+                                     &beta,
+                                     dC,
+                                     layC,
+                                     dD,
+                                     layD,
+                                     &heur[0].algo,
+                                     dWorkspace,
+                                     workspaceSize,
+                                     nullptr);
+        }
+
+        hipblasLtMatmulPreferenceDestroy(pref);
+        hipblasLtMatmulDescDestroy(mm);
+        hipblasLtMatrixLayoutDestroy(layA);
+        hipblasLtMatrixLayoutDestroy(layB);
+        hipblasLtMatrixLayoutDestroy(layC);
+        hipblasLtMatrixLayoutDestroy(layD);
+        return status;
+    }
+
     std::vector<float> referenceRmsNormRows(const std::vector<uint16_t>& hA,
                                             const std::vector<uint16_t>& hB,
                                             const std::vector<uint16_t>& hGamma,
@@ -919,6 +989,133 @@ TEST(FusedEpilogueE2E, fullRmsNormResidualAddMatchesReference)
         GTEST_SKIP() << "fused RMSNorm (PartialRMS) is wired for gfx950 only";
 
     runFullRmsNormE2E(/*residualAdd=*/true);
+}
+
+TEST(FusedEpilogueE2E, fullRmsNormResidualAddRequantMatchesReference)
+{
+    if(!deviceIsGfx950())
+        GTEST_SKIP() << "fused RMSNorm requant is wired for gfx950 only";
+
+    using fp8 = hipblaslt_f8;
+    auto f8ToF = [](fp8 v) { return static_cast<float>(static_cast<_Float16>(v)); };
+
+    // TN, BF16 inputs with FP8 D. Shape matches the gfx950 PartialRMS residual-add logic.
+    const int64_t M = 1024, N = 1024, K = 4096;
+    const float   eps = 1e-5f;
+    const float   dequantScale = 0.125f;
+
+    std::vector<uint16_t> hA(static_cast<size_t>(K) * M);
+    std::vector<uint16_t> hB(static_cast<size_t>(K) * N);
+    std::vector<uint16_t> hGamma(N);
+    std::vector<uint16_t> hResidual(static_cast<size_t>(M) * N);
+    std::vector<fp8>      hC(static_cast<size_t>(M) * N, fp8(0.0f));
+    std::vector<fp8>      hD(static_cast<size_t>(M) * N);
+
+    std::mt19937                          rng(2026);
+    std::uniform_real_distribution<float> dist(-0.1f, 0.1f);
+    std::uniform_real_distribution<float> gdist(0.5f, 1.5f);
+    fillRandomBf16(hA, rng, dist);
+    fillRandomBf16(hB, rng, dist);
+    fillRandomBf16(hGamma, rng, gdist);
+    fillRandomBf16(hResidual, rng, dist);
+
+    void *dA = nullptr, *dB = nullptr, *dC = nullptr, *dD = nullptr, *dGamma = nullptr,
+         *dResidual = nullptr, *dScale = nullptr, *dWs = nullptr;
+    const size_t wsSize = size_t(256) * 1024 * 1024;
+    ASSERT_EQ(hipMalloc(&dA, hA.size() * sizeof(uint16_t)), hipSuccess);
+    ASSERT_EQ(hipMalloc(&dB, hB.size() * sizeof(uint16_t)), hipSuccess);
+    ASSERT_EQ(hipMalloc(&dC, hC.size() * sizeof(fp8)), hipSuccess);
+    ASSERT_EQ(hipMalloc(&dD, hD.size() * sizeof(fp8)), hipSuccess);
+    ASSERT_EQ(hipMalloc(&dGamma, hGamma.size() * sizeof(uint16_t)), hipSuccess);
+    ASSERT_EQ(hipMalloc(&dResidual, hResidual.size() * sizeof(uint16_t)), hipSuccess);
+    ASSERT_EQ(hipMalloc(&dScale, sizeof(float)), hipSuccess);
+    ASSERT_EQ(hipMalloc(&dWs, wsSize), hipSuccess);
+
+    ASSERT_EQ(hipMemcpy(dA, hA.data(), hA.size() * sizeof(uint16_t), hipMemcpyHostToDevice),
+              hipSuccess);
+    ASSERT_EQ(hipMemcpy(dB, hB.data(), hB.size() * sizeof(uint16_t), hipMemcpyHostToDevice),
+              hipSuccess);
+    ASSERT_EQ(hipMemcpy(dC, hC.data(), hC.size() * sizeof(fp8), hipMemcpyHostToDevice),
+              hipSuccess);
+    ASSERT_EQ(hipMemcpy(dGamma, hGamma.data(), hGamma.size() * sizeof(uint16_t),
+                        hipMemcpyHostToDevice),
+              hipSuccess);
+    ASSERT_EQ(hipMemcpy(dResidual,
+                        hResidual.data(),
+                        hResidual.size() * sizeof(uint16_t),
+                        hipMemcpyHostToDevice),
+              hipSuccess);
+    ASSERT_EQ(hipMemcpy(dScale, &dequantScale, sizeof(float), hipMemcpyHostToDevice), hipSuccess);
+    ASSERT_EQ(hipMemset(dD, 0, hD.size() * sizeof(fp8)), hipSuccess);
+
+    hipblasLtHandle_t handle = nullptr;
+    ASSERT_EQ(hipblasLtCreate(&handle), HIPBLAS_STATUS_SUCCESS);
+
+    hipblasLtFusedEpilogueDescriptor_t fused = nullptr;
+    ASSERT_EQ(hipblasLtFusedEpilogueCreate(&fused), HIPBLAS_STATUS_SUCCESS);
+    ASSERT_EQ(hipblasLtFusedEpilogueAdd(fused, HIPBLASLT_FUSEABLE_EPILOGUE_RESIDUAL_ADD),
+              HIPBLAS_STATUS_SUCCESS);
+    ASSERT_EQ(hipblasLtFusedEpilogueAdd(fused, HIPBLASLT_FUSEABLE_EPILOGUE_RMSNORM),
+              HIPBLAS_STATUS_SUCCESS);
+    ASSERT_EQ(hipblasLtFusedEpilogueAdd(fused, HIPBLASLT_FUSEABLE_EPILOGUE_REQUANT),
+              HIPBLAS_STATUS_SUCCESS);
+    ASSERT_EQ(hipblasLtFusedEpilogueSetAttribute(
+                  fused, HIPBLASLT_FUSED_EPILOGUE_RESIDUAL_POINTER, &dResidual, sizeof(dResidual)),
+              HIPBLAS_STATUS_SUCCESS);
+    ASSERT_EQ(hipblasLtFusedEpilogueSetAttribute(
+                  fused, HIPBLASLT_FUSED_EPILOGUE_RMSNORM_GAMMA, &dGamma, sizeof(dGamma)),
+              HIPBLAS_STATUS_SUCCESS);
+    ASSERT_EQ(hipblasLtFusedEpilogueSetAttribute(
+                  fused, HIPBLASLT_FUSED_EPILOGUE_RMSNORM_EPS, &eps, sizeof(eps)),
+              HIPBLAS_STATUS_SUCCESS);
+    ASSERT_EQ(hipblasLtFusedEpilogueSetAttribute(
+                  fused, HIPBLASLT_FUSED_EPILOGUE_REQUANT_SCALE_POINTER, &dScale, sizeof(dScale)),
+              HIPBLAS_STATUS_SUCCESS);
+    hipblasLtRequantScaleComputeMode_t mode = HIPBLASLT_REQUANT_SCALE_STATIC;
+    ASSERT_EQ(hipblasLtFusedEpilogueSetAttribute(
+                  fused, HIPBLASLT_FUSED_EPILOGUE_REQUANT_SCALE_COMPUTE_MODE, &mode, sizeof(mode)),
+              HIPBLAS_STATUS_SUCCESS);
+    hipblasLtRequantScaleGranularity_t granularity = HIPBLASLT_REQUANT_SCALE_PER_TENSOR;
+    ASSERT_EQ(hipblasLtFusedEpilogueSetAttribute(fused,
+                                                 HIPBLASLT_FUSED_EPILOGUE_REQUANT_SCALE_GRANULARITY,
+                                                 &granularity,
+                                                 sizeof(granularity)),
+              HIPBLAS_STATUS_SUCCESS);
+
+    int algoCount = 0;
+    const hipblasStatus_t status = runBf16TnFusedMatmulFp8D(
+        handle, M, N, K, dA, K, dB, dC, dD, fused, dWs, wsSize, algoCount);
+    ASSERT_EQ(status, HIPBLAS_STATUS_SUCCESS);
+    ASSERT_GT(algoCount, 0) << "no PartialRMS requant solution selected";
+    ASSERT_EQ(hipDeviceSynchronize(), hipSuccess);
+
+    ASSERT_EQ(hipMemcpy(hD.data(), dD, hD.size() * sizeof(fp8), hipMemcpyDeviceToHost),
+              hipSuccess);
+
+    const auto reference = referenceRmsNormRows(hA, hB, hGamma, &hResidual, M, N, K, eps);
+    size_t     mismatches = 0;
+    double     maxAbsErr  = 0.0;
+    for(size_t i = 0; i < hD.size(); ++i)
+    {
+        const float got = f8ToF(hD[i]) * dequantScale;
+        const float ref = reference[i];
+        const float abs = std::abs(got - ref);
+        maxAbsErr       = std::max(maxAbsErr, static_cast<double>(abs));
+        if(abs > std::max(0.08f, 0.12f * std::abs(ref)))
+            ++mismatches;
+    }
+    EXPECT_EQ(mismatches, 0u) << "max abs error " << maxAbsErr;
+
+    hipblasLtFusedEpilogueDestroy(fused);
+    hipblasLtDestroy(handle);
+    static_cast<void>(hipFree(dA));
+    static_cast<void>(hipFree(dB));
+    static_cast<void>(hipFree(dC));
+    static_cast<void>(hipFree(dD));
+    static_cast<void>(hipFree(dGamma));
+    static_cast<void>(hipFree(dResidual));
+    static_cast<void>(hipFree(dScale));
+    static_cast<void>(hipFree(dWs));
 }
 
 // ---- End-to-end numeric test: decomposed RMSNorm consumer (Kernel 3 RstdScale) ----
