@@ -328,6 +328,7 @@ REQUIRED_CONFIG_FIELDS = ["TRANSA", "TRANSB", "DataType", "DestDataType", "Compu
 # User YAML overrides via ``setdefault`` in ``load_input_config._prepare_config``.
 # To add or change per-ARCH optional defaults, edit ``CONFIG_DEFAULTS_BY_ARCH`` below.
 _CONFIG_OPTIONAL_COMMON = {
+    "MX": False,
     "RMS_EPILOGUE": False,
     "RMS_EPILOGUE_GAMMA_TYPE": "b",
     "RMS_EPILOGUE_RESIDUAL_TYPE": "b",

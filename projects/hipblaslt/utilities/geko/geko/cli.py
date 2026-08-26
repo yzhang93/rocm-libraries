@@ -218,6 +218,16 @@ def build_parser() -> argparse.ArgumentParser:
         help="Do not retry failed operations (used with --tune)",
     )
     parser.add_argument(
+        "--mx",
+        action="store_true",
+        default=False,
+        help=(
+            "Enable Microscaling (MX) mode with block size 32 and E8M0 scales. "
+            "Required for MX FP8 GEMMs; auto-forced for FP4. "
+            "Auto-detected from workload logs (scaleA/scaleB >= 3)."
+        ),
+    )
+    parser.add_argument(
         "--bench-freq",
         dest="bench_freq",
         action="store_true",
@@ -255,6 +265,7 @@ class CliArgs:
     benchmark_duration: float
     retry: bool
     bench_freq: bool
+    mx: bool
 
 
 def parse_cli_args(argv: Sequence[str] | None) -> CliArgs:
@@ -321,6 +332,7 @@ def parse_cli_args(argv: Sequence[str] | None) -> CliArgs:
         benchmark_duration=ns.benchmark_duration,
         retry=not ns.no_retry,
         bench_freq=ns.bench_freq,
+        mx=ns.mx,
     )
 
 
@@ -409,6 +421,7 @@ def dispatch(args: CliArgs, anchor: str | None = None) -> int:
             verbose=args.verbose,
             bench_freq=args.bench_freq,
             config_overrides=config_overrides,
+            mx=args.mx,
         )
         run_optimize(
             hipblaslt_path,
