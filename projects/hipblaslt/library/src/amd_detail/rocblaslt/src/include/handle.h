@@ -129,6 +129,24 @@ struct _rocblaslt_handle
     bool                  check_numerics_stop_on_first = false;
     // Sticky bypass for scan_D once any caller observes a NaN.
     std::atomic<bool>     check_numerics_short_circuit{false};
+
+    // Device communicator, registered once by hipblasLtSetDeviceComm. Every rank
+    // registers on its own handle; the W handles form one communicator, of which
+    // this is the local view. Absent (device_comm_registered == false) unless a
+    // caller asks for a communicating fused epilogue.
+    bool     device_comm_registered = false;
+    uint32_t device_comm_rank       = 0;
+    uint32_t device_comm_world      = 0;
+    uint32_t device_comm_channels   = 0;
+
+    // Library-owned completion flags: device_comm_channels independent regions on
+    // this device, never passed in nor readable by the caller. device_comm_flags
+    // is this device's allocation; device_comm_peer_flags[j] is rank j's region as
+    // addressed from this process, which for a peer in another process means an
+    // IPC mapping this handle owns and closes.
+    void* device_comm_flags                                             = nullptr;
+    void* device_comm_peer_flags[HIPBLASLT_DEVICE_COMM_MAX_WORLD]        = {};
+    bool  device_comm_peer_flags_mapped[HIPBLASLT_DEVICE_COMM_MAX_WORLD] = {};
 };
 
 /********************************************************************************
@@ -230,6 +248,10 @@ struct _rocblaslt_matmul_desc
     // Default value is 0 which means same bias vector will be used across all batches (broadcast).
     int32_t bias_stride = 0;
 
+    // Fused epilogue attached via ROCBLASLT_MATMUL_DESC_FUSED_EPILOGUE. Non-owning:
+    // the descriptor is the caller's and must outlive every matmul using this desc.
+    const struct hipblasLtFusedEpilogueDescriptor* fused_epilogue = nullptr;
+
     std::shared_ptr<void> m_data; // Tensile data
 
     void copy(const _rocblaslt_matmul_desc& src)
@@ -263,6 +285,7 @@ struct _rocblaslt_matmul_desc
         this->streamk_tile_scheduling_ext = src.streamk_tile_scheduling_ext;
         this->uniform_summation_order = src.uniform_summation_order;
         this->bias_stride             = src.bias_stride;
+        this->fused_epilogue          = src.fused_epilogue;
     }
 };
 
