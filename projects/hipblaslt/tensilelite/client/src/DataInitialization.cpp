@@ -3441,8 +3441,12 @@ namespace TensileLite
             {
                 auto    castInputs   = static_pointer_cast<ContractionInputs>(inputs);
                 size_t  rotatingSize = getRotatingSize(*gemmProblem, *castInputs);
+                // Truncating division, not ceil: the copies live past the largest
+                // unit, so rounding the count up asks for more than the budget
+                // holds and aborts below once a tensor is added to the rotation
+                // (e.g. the PartialRMS partial buffer).
                 int32_t rotatingNum
-                    = std::min(maxRotatingBufferNum, static_cast<int32_t>(ceil((float)m_rotatingBuffer / rotatingSize)))
+                    = std::min(maxRotatingBufferNum, static_cast<int32_t>(m_rotatingBuffer / rotatingSize))
                       - 1; // Minus the original buffer.
 
                 // <= 0 means don't rotating
@@ -3505,7 +3509,7 @@ namespace TensileLite
                         += getRotatingSize(groupedProblem->gemms[i], castInputs->grouped[i]);
                 }
                 int32_t rotatingNum
-                    = std::min(maxRotatingBufferNum, static_cast<int32_t>(ceil((float)m_rotatingBuffer / rotatingSize)))
+                    = std::min(maxRotatingBufferNum, static_cast<int32_t>(m_rotatingBuffer / rotatingSize))
                       - 1; // Minus the original buffer.
 
                 // <= 0 means don't rotating
