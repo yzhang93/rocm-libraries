@@ -42,6 +42,18 @@ target_link_libraries(hipblaslt-clients-common
         roc::tensilelite-host
 )
 
+# LAPACK_LIBRARIES is a Fortran static archive, but every target that consumes
+# it here links as C++, so the Fortran runtime is never pulled in the way it
+# would be on a Fortran link line. Which runtime that is depends on the
+# compiler enable_language(Fortran) picked (libgfortran for gfortran,
+# FortranRuntime/FortranDecimal for flang), so take it from CMake's detection.
+if(LAPACK_LIBRARIES)
+    target_link_directories(hipblaslt-clients-common
+        PUBLIC ${CMAKE_Fortran_IMPLICIT_LINK_DIRECTORIES})
+    target_link_libraries(hipblaslt-clients-common
+        PUBLIC ${CMAKE_Fortran_IMPLICIT_LINK_LIBRARIES})
+endif()
+
 if(HIPBLASLT_ENABLE_MXDATAGENERATOR)
     # PUBLIC because public headers such as testing_matmul.hpp guard
     # `<mxDataGen.hpp>` on `HIPBLASLT_ENABLE_MXDATAGENERATOR`, so downstream
