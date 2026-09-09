@@ -327,6 +327,10 @@ REQUIRED_CONFIG_FIELDS = ["TRANSA", "TRANSB", "DataType", "DestDataType", "Compu
 # To add or change per-ARCH optional defaults, edit ``CONFIG_DEFAULTS_BY_ARCH`` below.
 _CONFIG_OPTIONAL_COMMON = {
     "MX": False,
+    "PARTIAL_RMS": False,
+    "PARTIAL_RMS_RESIDUAL_ADD": False,
+    "PARTIAL_RMS_QUANT": False,
+    "PARTIAL_RMS_MT1": None,
     "StreamK": True,
     "search_space": None,
     "MACROTILE_OPT": False,

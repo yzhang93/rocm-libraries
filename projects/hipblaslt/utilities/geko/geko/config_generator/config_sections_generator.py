@@ -48,10 +48,21 @@ class ConfigSectionGenerator:
         """Whether Microscaling (MX) mode is enabled for this config."""
         return self.config.get("MX", False)
 
+    def _use_partial_rms(self) -> bool:
+        """Whether the fused RMSNorm (PartialRMS) epilogue is enabled."""
+        return self.config.get("PARTIAL_RMS", False)
+
     def _use_epilogues(self) -> bool:
-        """Whether to emit epilogue fields for this GEMM type."""
+        """Whether to emit epilogue fields for this GEMM type.
+
+        The fused RMSNorm epilogue owns the store path, so the classic
+        bias/activation/ScaleAlphaVec epilogue fields are suppressed: the
+        tuned PartialRMS solutions are generated without them.
+        """
         gt = self._gt
         no_epilogue = (gt.data_type == "D" and gt.dest_data_type == "D") or gt.data_type in ("C", "Z")
+        if self._use_partial_rms():
+            return False
         return self.config["EPILOGUES"] and not no_epilogue
 
     def __init__(self, config: Dict[str, Any]) -> None:
@@ -107,6 +118,15 @@ class ConfigSectionGenerator:
                 pt[f'{epi_tag}UseScaleAB'] = "Scalar"
 
         pt['Batched'] = "True"
+
+        if self._use_partial_rms():
+            # ProblemType-level dispatch predicate; the matching solution-level
+            # PartialRMS parameter is forced by the fork-param post-processor.
+            pt['UsePartialRMS'] = "True"
+            pt['PartialRMSResidualAdd'] = (
+                "True" if self.config.get("PARTIAL_RMS_RESIDUAL_ADD", False) else "False")
+            pt['PartialRMSQuant'] = (
+                "True" if self.config.get("PARTIAL_RMS_QUANT", False) else "False")
 
         if self._is_tf32(self._gt.data_type) and self._gt.data_type != "X1":
             pt['F32XdlMathOp'] = self._gt.data_type

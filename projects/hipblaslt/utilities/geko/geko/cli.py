@@ -46,14 +46,43 @@ def _alloc_run_root() -> Path:
     return root
 
 
-def _rows_from_gemm_config_yaml(path: Path, arch: str | None) -> List[dict]:
-    """Flatten GemmProblems from load_prepared_config_from_yaml to workload-log dicts."""
+# Config keys the pipeline derives on its own: either from CLI flags or by
+# re-deriving the GEMM types from the synthesized workload log. Everything else
+# in a --list YAML is a generator setting and is forwarded to optim.configure,
+# so tuning YAML keys such as CMS or PARTIAL_RMS are honored rather than
+# silently dropped once the workload has been flattened.
+_PIPELINE_OWNED_CONFIG_KEYS = frozenset({
+    "ARCH",
+    "backend",
+    "search_space",
+    "GemmProblems",
+    "GEMM_LOG_PATH",
+    "SIZE_OPTION",
+    "Sizes",
+    "TRANSA",
+    "TRANSB",
+    "DataType",
+    "DestDataType",
+    "ComputeDataType",
+})
+
+
+def _rows_from_gemm_config_yaml(path: Path, arch: str | None) -> tuple[List[dict], dict]:
+    """Flatten GemmProblems to workload-log dicts, keeping the generator settings.
+
+    Returns (rows, config_overrides): the workload rows the rest of the
+    pipeline consumes, plus the tuning YAML's generator settings so they
+    survive the round-trip through the synthesized workload log.
+    """
     prepared = load_prepared_config_from_yaml(config_path=path, arch=arch)
     problems: List[GemmConfig] = prepared["GemmProblems"]
     rows: List[dict] = []
     for gc in problems:
         rows.extend(gc.workload_log_rows())
-    return rows
+    overrides = {
+        k: v for k, v in prepared.items() if k not in _PIPELINE_OWNED_CONFIG_KEYS
+    }
+    return rows, overrides
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -328,11 +357,12 @@ def dispatch(args: CliArgs, anchor: str | None = None) -> int:
     logger.info(f"hipBLASLt path: '{hipblaslt_path}'")
 
     log_path: Path
+    config_overrides: dict = {}
     if args.workload is not None:
         log_path = Path(args.workload)
     elif args.gemm_config is not None:
         try:
-            rows = _rows_from_gemm_config_yaml(Path(args.gemm_config), args.arch)
+            rows, config_overrides = _rows_from_gemm_config_yaml(Path(args.gemm_config), args.arch)
         except (ValueError, FileNotFoundError) as e:
             logger.error(str(e))
             logger.error("Example tuning YAML: %s", _SAMPLE_GEMM_LIST_YAML)
@@ -391,6 +421,7 @@ def dispatch(args: CliArgs, anchor: str | None = None) -> int:
             verbose=args.verbose,
             bench_freq=args.bench_freq,
             mx=args.mx,
+            config_overrides=config_overrides,
         )
         run_optimize(
             hipblaslt_path,

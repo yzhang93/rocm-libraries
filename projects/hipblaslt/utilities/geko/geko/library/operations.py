@@ -118,8 +118,15 @@ def load_collection(lib_dir: str | Path) -> LibraryCollection:
 
 
 def _library_supports_epilogues(lib: Library) -> bool:
-    """Return False for f64 and complex libraries; epilogues are not supported."""
+    """Return False for f64 and complex libraries; epilogues are not supported.
+
+    PartialRMS libraries are excluded too: the fused RMSNorm epilogue owns the
+    store path, so the kernels were tuned (and can only be assembled) without
+    the bias/activation/scaleAlphaVec arguments this would bolt on.
+    """
     _NO_EPILOGUE_TYPES = ("f64_r", "f32_c", "f64_c")
+    if lib.problem.get("UsePartialRMS", False):
+        return False
     data_type = lib.problem.get("DataType")
     return INDEX_TYPE_MAP.get(data_type) not in _NO_EPILOGUE_TYPES
 
