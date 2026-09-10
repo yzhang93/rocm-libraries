@@ -52,6 +52,14 @@ class ConfigSectionGenerator:
         """Whether the fused RMSNorm (PartialRMS) epilogue is enabled."""
         return self.config.get("PARTIAL_RMS", False)
 
+    def _scale_alpha_vec_only(self) -> bool:
+        """Whether to emit ScaleAlphaVec as the sole epilogue.
+
+        This matches the RMSNorm scale-apply consumer GEMM, which carries the
+        per-row rstd in the scaleAlphaVec slot and uses no bias or activation.
+        """
+        return self.config.get("SCALE_ALPHA_VEC_ONLY", False)
+
     def _use_epilogues(self) -> bool:
         """Whether to emit epilogue fields for this GEMM type.
 
@@ -61,7 +69,7 @@ class ConfigSectionGenerator:
         """
         gt = self._gt
         no_epilogue = (gt.data_type == "D" and gt.dest_data_type == "D") or gt.data_type in ("C", "Z")
-        if self._use_partial_rms():
+        if self._use_partial_rms() or self._scale_alpha_vec_only():
             return False
         return self.config["EPILOGUES"] and not no_epilogue
 
@@ -106,10 +114,11 @@ class ConfigSectionGenerator:
         pt['UseBeta'] = "True"
 
         epi_tag = "" if self._use_epilogues() else "#"
+        sav_tag = "" if (self._use_epilogues() or self._scale_alpha_vec_only()) else "#"
         pt[f'{epi_tag}Activation'] = "True"
         pt[f'{epi_tag}ActivationHPA'] = "True"
         pt[f'{epi_tag}ActivationType'] = "hipblaslt_all"
-        pt[f'{epi_tag}UseScaleAlphaVec'] = "1"
+        pt[f'{sav_tag}UseScaleAlphaVec'] = "1"
         pt[f'{epi_tag}UseBias'] = "1"
         if self._is_mx():
             pt[f'{epi_tag}BiasDataTypeList'] = "[s]"

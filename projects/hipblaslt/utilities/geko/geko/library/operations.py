@@ -123,9 +123,15 @@ def _library_supports_epilogues(lib: Library) -> bool:
     PartialRMS libraries are excluded too: the fused RMSNorm epilogue owns the
     store path, so the kernels were tuned (and can only be assembled) without
     the bias/activation/scaleAlphaVec arguments this would bolt on.
+
+    ScaleAlphaVec-only libraries (the RMSNorm scale-apply consumer) are excluded
+    for the same reason: their kernels carry the scaleAlphaVec argument alone,
+    so advertising bias and activation support would not match the assembly.
     """
     _NO_EPILOGUE_TYPES = ("f64_r", "f32_c", "f64_c")
     if lib.problem.get("UsePartialRMS", False):
+        return False
+    if lib.problem.get("UseScaleAlphaVec", 0) and not lib.problem.get("UseBias", 0):
         return False
     data_type = lib.problem.get("DataType")
     return INDEX_TYPE_MAP.get(data_type) not in _NO_EPILOGUE_TYPES
