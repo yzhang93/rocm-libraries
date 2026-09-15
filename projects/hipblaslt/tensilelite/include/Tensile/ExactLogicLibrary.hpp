@@ -281,7 +281,16 @@ namespace TensileLite
                 if(row.first.value->type() == "ExperimentalStreamK" && !streamK)
                     continue;
 
+                // Prediction mode exists to let the ML model override AMD's own
+                // tuned tables, which is not a reason to discard a kernel the
+                // application generated for this exact shape: an explicit user
+                // mapping outranks a prediction. The user row cannot be
+                // recognised by type string, because UserExactMatching derives
+                // from EqualityMatching and Property_CRTP::type() is final, so
+                // it reports "EqualityMatching" too. Exclude it by cast.
                 if(predictionLib
+                   && !dynamic_cast<Predicates::Contraction::UserExactMatching*>(
+                       row.first.value.get())
                    && ((row.first.value->type() == "EqualityMatching")
                        || (row.first.value->type() == "RangeMatching")))
                     continue;

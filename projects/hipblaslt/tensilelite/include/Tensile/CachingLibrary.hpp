@@ -31,6 +31,7 @@
 #include <unordered_map>
 
 #include <Tensile/ContractionProblem.hpp>
+#include <Tensile/LibraryGeneration.hpp>
 #include <Tensile/SolutionLibrary.hpp>
 
 #include <Tensile/AMDGPU_Detail.hpp>
@@ -160,19 +161,34 @@ namespace TensileLite
     {
     public:
         using Library = SolutionLibrary<MyProblem, MySolution>;
-        using Cache  = CacheMap<std::tuple<std::shared_ptr<MySolution>, double>, AMDGPU, MyProblem>;
-        using Caches = CacheMap<SolutionVector<MySolution>, AMDGPU, MyProblem>;
-        using CachesAllSolsFlag
-            = CacheMap<bool, AMDGPU, MyProblem>;
-        using CachesGroupedGemm
-            = CacheMap<SolutionVector<MySolution>, AMDGPU, std::vector<MyProblem>>;
+        // Every memoized value carries the library generation it was resolved
+        // under, so an entry that predates a user kernel registration can be
+        // recognised as stale. See LibraryGeneration.hpp.
+        using Cache
+            = CacheMap<std::tuple<std::shared_ptr<MySolution>, double, uint64_t>, AMDGPU, MyProblem>;
+        // The solution vector and the "cache already holds every solution" flag
+        // were two maps keyed identically. They cannot be stamped
+        // independently: the hit condition below is satisfied by the flag
+        // alone, so a stale flag would return a stale vector even after the
+        // generation advances. Worse, the flag's map was CacheMap<bool> with a
+        // null value of false, making "absent" indistinguishable from "cached
+        // false". Merged here so one lookup yields one staleness decision.
+        using Caches
+            = CacheMap<std::tuple<SolutionVector<MySolution>, bool, uint64_t>, AMDGPU, MyProblem>;
+        using CachesGroupedGemm = CacheMap<std::tuple<SolutionVector<MySolution>, uint64_t>,
+                                           AMDGPU,
+                                           std::vector<MyProblem>>;
 
-        CachingLibrary(std::shared_ptr<Library> subLibrary)
+        // The generation is optional so that callers which construct a cache
+        // outside a MasterSolutionLibrary keep working; a private counter never
+        // advances, which reproduces the previous always-fresh behaviour.
+        CachingLibrary(std::shared_ptr<Library>           subLibrary,
+                       std::shared_ptr<LibraryGeneration> generation = nullptr)
             : m_subLibrary(subLibrary)
-            , m_cache(std::make_tuple(nullptr, std::numeric_limits<double>::max()))
-            , m_caches(SolutionVector<MySolution>{})
-            , m_cachesAllSolutions(false)
-            , m_cachesGroupedGemm(SolutionVector<MySolution>{})
+            , m_generation(generation ? generation : std::make_shared<LibraryGeneration>())
+            , m_cache(std::make_tuple(nullptr, std::numeric_limits<double>::max(), uint64_t{0}))
+            , m_caches(std::make_tuple(SolutionVector<MySolution>{}, false, uint64_t{0}))
+            , m_cachesGroupedGemm(std::make_tuple(SolutionVector<MySolution>{}, uint64_t{0}))
         {
         }
 
@@ -193,16 +209,30 @@ namespace TensileLite
                 double cachedFitness = std::numeric_limits<double>::max();
                 fitness              = (fitness) ? fitness : &cachedFitness;
 
-                auto const&                 amdgpu = dynamic_cast<AMDGPU const&>(hardware);
-                std::shared_ptr<MySolution> solution;
-                std::tie(solution, *fitness) = m_cache.find(problem, amdgpu);
+                auto const& amdgpu = dynamic_cast<AMDGPU const&>(hardware);
 
-                if(solution)
+                // Read the generation before resolving, so a registration that
+                // lands during resolution stamps the result as the older
+                // generation and is re-resolved on the next call rather than
+                // being cached as current.
+                const uint64_t gen = m_generation->value.load(std::memory_order_acquire);
+
+                std::shared_ptr<MySolution> solution;
+                uint64_t                    entryGen = 0;
+                std::tie(solution, *fitness, entryGen) = m_cache.find(problem, amdgpu);
+
+                if(solution && entryGen == gen)
                     return solution;
+
+                // Rejecting a stale entry must also discard its fitness, which
+                // the tie above has already written through, so the sub-library
+                // sees the same starting value it would on a plain miss.
+                if(solution)
+                    *fitness = std::numeric_limits<double>::max();
 
                 solution = m_subLibrary->findBestSolution(problem, hardware, fitness);
                 if(solution)
-                    m_cache.add(std::make_tuple(solution, *fitness), problem, amdgpu);
+                    m_cache.add(std::make_tuple(solution, *fitness, gen), problem, amdgpu);
 
                 return solution;
             }
@@ -235,7 +265,11 @@ namespace TensileLite
         {
             auto const& amdgpu = dynamic_cast<AMDGPU const&>(hardware);
 
-            return std::get<std::shared_ptr<MySolution>>(m_cache.find(problem, amdgpu));
+            auto entry = m_cache.find(problem, amdgpu);
+            if(std::get<uint64_t>(entry) != m_generation->value.load(std::memory_order_acquire))
+                return nullptr;
+
+            return std::get<std::shared_ptr<MySolution>>(entry);
         }
 
         virtual std::string type() const override
@@ -258,26 +292,30 @@ namespace TensileLite
         {
             try
             {
-                auto const&                amdgpu = dynamic_cast<AMDGPU const&>(hardware);
-                SolutionVector<MySolution> solutions;
-                bool                       cacheAlreadyContainAll;
-                solutions = m_caches.find(problem, amdgpu);
-                cacheAlreadyContainAll = m_cachesAllSolutions.find(problem, amdgpu);
-                // set flag in case of early return
-                lastFindTopRetAll = cacheAlreadyContainAll;
+                auto const&    amdgpu = dynamic_cast<AMDGPU const&>(hardware);
+                const uint64_t gen    = m_generation->value.load(std::memory_order_acquire);
 
-                if(solutions.size() >= numSolutions || cacheAlreadyContainAll)
+                SolutionVector<MySolution> solutions;
+                bool                       cacheAlreadyContainAll = false;
+                uint64_t                   entryGen               = 0;
+                std::tie(solutions, cacheAlreadyContainAll, entryGen)
+                    = m_caches.find(problem, amdgpu);
+
+                if(entryGen == gen
+                   && (solutions.size() >= numSolutions || cacheAlreadyContainAll))
+                {
+                    // getBestSolutions consumes lastFindTopAlreadyRetAll() to
+                    // decide whether to fall back to getAllSolutions, so the
+                    // hit path must publish the flag before returning.
+                    lastFindTopRetAll = cacheAlreadyContainAll;
                     return solutions;
+                }
 
                 solutions = m_subLibrary->findTopSolutions(problem, hardware, numSolutions);
                 if(solutions.size() != 0)
                 {
                     bool alreadyRetAll = m_subLibrary->lastFindTopAlreadyRetAll();
-                    m_caches.add(solutions, problem, amdgpu);
-                    m_cachesAllSolutions.add(alreadyRetAll, problem, amdgpu);
-                    // debug
-                    // std::cout << "m_cachesAllSolutions.add() with solution.size() = " << solutions.size()
-                    //           << " and alreadyRetAll: " << (alreadyRetAll? "True" : "False") << std::endl;
+                    m_caches.add(std::make_tuple(solutions, alreadyRetAll, gen), problem, amdgpu);
                 }
 
                 // can't reach the requested number, means findTop already done its best
@@ -304,17 +342,20 @@ namespace TensileLite
         {
             try
             {
-                auto const&                amdgpu = dynamic_cast<AMDGPU const&>(hardware);
-                SolutionVector<MySolution> solutions;
-                solutions = m_cachesGroupedGemm.find(problems, amdgpu);
+                auto const&    amdgpu = dynamic_cast<AMDGPU const&>(hardware);
+                const uint64_t gen    = m_generation->value.load(std::memory_order_acquire);
 
-                if(solutions.size() != 0)
+                SolutionVector<MySolution> solutions;
+                uint64_t                   entryGen = 0;
+                std::tie(solutions, entryGen)       = m_cachesGroupedGemm.find(problems, amdgpu);
+
+                if(solutions.size() != 0 && entryGen == gen)
                     return solutions;
 
                 solutions
                     = m_subLibrary->findTopSolutionsGroupedGemm(problems, hardware, numSolutions);
                 if(solutions.size() != 0)
-                    m_cachesGroupedGemm.add(solutions, problems, amdgpu);
+                    m_cachesGroupedGemm.add(std::make_tuple(solutions, gen), problems, amdgpu);
 
                 return solutions;
             }
@@ -326,12 +367,12 @@ namespace TensileLite
         }
 
     private:
-        std::shared_ptr<Library>  m_subLibrary;
-        mutable Cache             m_cache;
-        mutable Caches            m_caches;
-        mutable CachesAllSolsFlag m_cachesAllSolutions;
-        mutable CachesGroupedGemm m_cachesGroupedGemm;
-        mutable std::atomic<bool> lastFindTopRetAll = false;
+        std::shared_ptr<Library>           m_subLibrary;
+        std::shared_ptr<LibraryGeneration> m_generation;
+        mutable Cache                      m_cache;
+        mutable Caches                     m_caches;
+        mutable CachesGroupedGemm          m_cachesGroupedGemm;
+        mutable std::atomic<bool>          lastFindTopRetAll = false;
     };
 
 #if 0

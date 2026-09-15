@@ -85,7 +85,7 @@
 // FORCE a collision at the unit level and assert collision-safety for EVERY cache
 // CachingLibrary owns:
 //   * findBestSolution (m_cache)                         -- #7754 made it size_t-keyed; this
-//   * findTopSolutions (m_caches / m_cachesAllSolutions) -- test FAILS on #7754, PASSES on the fix.
+//   * findTopSolutions (m_caches)                        -- test FAILS on #7754, PASSES on the fix.
 //   * findTopSolutionsGroupedGemm (m_cachesGroupedGemm)  -- this cache was NOT changed by #7754
 //        (it stayed keyed on the full std::vector<MyProblem>); the test below is therefore a
 //        PREVENTIVE guard that PASSES on both, ensuring this last cache is never regressed into
@@ -95,9 +95,13 @@
 
 #include <gtest/gtest.h>
 
+#include <cstdint>
+
 #include <Tensile/AMDGPU.hpp>
 #include <Tensile/CachingLibrary.hpp>
+#include <Tensile/LibraryGeneration.hpp>
 #include <Tensile/SolutionLibrary.hpp>
+#include <Tensile/UserKernelIndex.hpp>
 
 using namespace TensileLite;
 
@@ -158,6 +162,15 @@ namespace
         mutable int findBestCalls     = 0;
         mutable int findTopCalls      = 0;
         mutable int findTopGroupCalls = 0;
+
+        // What findTopSolutions reports about completeness. The SolutionLibrary
+        // base returns true, so this default preserves that.
+        bool retAll = true;
+
+        bool lastFindTopAlreadyRetAll() const override
+        {
+            return retAll;
+        }
 
         std::shared_ptr<MockSolution> makeSolution(int id) const
         {
@@ -335,4 +348,198 @@ TEST(CachingLibraryCollision, smoke_FindTopSolutionsGroupedGemmDistinguishesColl
         << "ROCM-25647 (preventive): CachingLibrary::findTopSolutionsGroupedGemm returned the "
            "wrong, hash-colliding problem group's cached solutions. The grouped-GEMM cache must "
            "stay keyed on the full std::vector<MyProblem>, not a lossy hash.";
+}
+
+// ---------------------------------------------------------------------------
+// Cache coherence across a user kernel registration.
+//
+// CachingLibrary sits above the row ladder and answers without consulting it,
+// so registering a kernel for a problem that is already memoized would leave
+// the new kernel invisible to the one problem it was built for -- and that
+// problem is by construction the shape a tuning loop has been hammering, so it
+// is the entry most certain to be cached.
+//
+// The mechanism is a generation counter shared with the enclosing
+// MasterSolutionLibrary. Cached values carry the generation they were resolved
+// under; a mismatch is treated as a miss and re-resolved. Entries are never
+// erased, only rejected and overwritten.
+// ---------------------------------------------------------------------------
+
+// findBestSolution must re-resolve after the generation advances.
+TEST(CachingLibraryGeneration, smoke_FindBestSolutionRejectsStaleEntry)
+{
+    MockProblem a{11};
+
+    auto sub        = std::make_shared<MockSubLibrary>();
+    auto generation = std::make_shared<LibraryGeneration>();
+    CachingLibrary<MockProblem, MockSolution> library(sub, generation);
+    auto                                      gpu = makeGpu();
+
+    (void)library.findBestSolution(a, gpu);
+    (void)library.findBestSolution(a, gpu);
+    ASSERT_EQ(sub->findBestCalls, 1) << "second lookup should have been a cache hit";
+
+    // Stands in for a registration publishing a new user tier snapshot.
+    generation->value.fetch_add(1, std::memory_order_release);
+
+    (void)library.findBestSolution(a, gpu);
+    EXPECT_EQ(sub->findBestCalls, 2)
+        << "after the generation advanced, the memoized solution predates the new user "
+           "tier and must be re-resolved rather than served from the cache.";
+
+    // And the refreshed entry is itself cacheable under the new generation.
+    (void)library.findBestSolution(a, gpu);
+    EXPECT_EQ(sub->findBestCalls, 2)
+        << "the re-resolved entry should be stamped with the current generation and hit.";
+}
+
+// findTopSolutions must re-resolve after the generation advances. This is the
+// path that matters most for the demo, since hipblasLtMatmulAlgoGetHeuristic
+// reaches Tensile through it.
+TEST(CachingLibraryGeneration, smoke_FindTopSolutionsRejectsStaleEntry)
+{
+    MockProblem a{12};
+
+    auto sub        = std::make_shared<MockSubLibrary>();
+    auto generation = std::make_shared<LibraryGeneration>();
+    CachingLibrary<MockProblem, MockSolution> library(sub, generation);
+    auto                                      gpu = makeGpu();
+
+    (void)library.findTopSolutions(a, gpu, 1);
+    (void)library.findTopSolutions(a, gpu, 1);
+    ASSERT_EQ(sub->findTopCalls, 1) << "second lookup should have been a cache hit";
+
+    generation->value.fetch_add(1, std::memory_order_release);
+
+    (void)library.findTopSolutions(a, gpu, 1);
+    EXPECT_EQ(sub->findTopCalls, 2)
+        << "a registered kernel must be reachable through findTopSolutions for the problem "
+           "it was registered for, which requires rejecting the stale memo entry.";
+}
+
+// The reason m_caches and m_cachesAllSolutions had to be merged rather than
+// stamped separately. The hit condition is satisfied by the completeness flag
+// alone, so a stale "cache holds everything" answer short-circuits the lookup
+// and returns a stale vector no matter how many solutions were requested. With
+// the flag living in the same stamped entry as the vector, one comparison
+// governs both.
+TEST(CachingLibraryGeneration, smoke_StaleContainsAllFlagDoesNotShortCircuit)
+{
+    MockProblem a{13};
+
+    auto sub = std::make_shared<MockSubLibrary>();
+    // The sub-library reports that one solution is all there is, so the cached
+    // entry records containsAll = true.
+    sub->retAll     = true;
+    auto generation = std::make_shared<LibraryGeneration>();
+    CachingLibrary<MockProblem, MockSolution> library(sub, generation);
+    auto                                      gpu = makeGpu();
+
+    (void)library.findTopSolutions(a, gpu, 1);
+    ASSERT_EQ(sub->findTopCalls, 1);
+
+    // Asking for more than was cached is still a hit, because containsAll says
+    // there is nothing more to find. That is correct while the library is
+    // unchanged.
+    (void)library.findTopSolutions(a, gpu, 8);
+    ASSERT_EQ(sub->findTopCalls, 1) << "containsAll should suppress a re-query on its own";
+
+    generation->value.fetch_add(1, std::memory_order_release);
+
+    (void)library.findTopSolutions(a, gpu, 8);
+    EXPECT_EQ(sub->findTopCalls, 2)
+        << "a stale containsAll flag must not short-circuit the lookup after the generation "
+           "advanced; the flag and the vector have to share one staleness decision.";
+}
+
+// The hit path has to keep publishing the completeness flag, because
+// getBestSolutions consumes lastFindTopAlreadyRetAll() to decide whether to
+// fall back to getAllSolutions.
+TEST(CachingLibraryGeneration, smoke_LastFindTopRetAllSurvivesCacheHit)
+{
+    MockProblem a{14};
+
+    auto sub    = std::make_shared<MockSubLibrary>();
+    sub->retAll = true;
+    auto generation = std::make_shared<LibraryGeneration>();
+    CachingLibrary<MockProblem, MockSolution> library(sub, generation);
+    auto                                      gpu = makeGpu();
+
+    // The miss path reports whether the sub-library came up short of the
+    // request, which for an exact fill is false -- distinct from the
+    // completeness flag it stores in the cache. That difference is what makes
+    // the assertion below meaningful: only the hit path can turn this true.
+    (void)library.findTopSolutions(a, gpu, 1);
+    ASSERT_FALSE(library.lastFindTopAlreadyRetAll());
+
+    // Served from the cache this time, so the flag must be republished from the
+    // cached entry rather than left where the previous call happened to leave it.
+    (void)library.findTopSolutions(a, gpu, 1);
+    ASSERT_EQ(sub->findTopCalls, 1) << "expected a cache hit";
+    EXPECT_TRUE(library.lastFindTopAlreadyRetAll())
+        << "the cache-hit path must publish the cached completeness flag, or callers lose the "
+           "signal that drives the getAllSolutions fallback.";
+}
+
+// Grouped GEMM shares the same staleness rule.
+TEST(CachingLibraryGeneration, smoke_GroupedGemmRejectsStaleEntry)
+{
+    std::vector<MockProblem> group{MockProblem{15}};
+
+    auto sub        = std::make_shared<MockSubLibrary>();
+    auto generation = std::make_shared<LibraryGeneration>();
+    CachingLibrary<MockProblem, MockSolution> library(sub, generation);
+    auto                                      gpu = makeGpu();
+
+    (void)library.findTopSolutionsGroupedGemm(group, gpu, 1);
+    (void)library.findTopSolutionsGroupedGemm(group, gpu, 1);
+    ASSERT_EQ(sub->findTopGroupCalls, 1) << "second lookup should have been a cache hit";
+
+    generation->value.fetch_add(1, std::memory_order_release);
+
+    (void)library.findTopSolutionsGroupedGemm(group, gpu, 1);
+    EXPECT_EQ(sub->findTopGroupCalls, 2)
+        << "the grouped-GEMM memo must honour the generation stamp too.";
+}
+
+// A cache constructed without a generation keeps a private counter that never
+// advances, so libraries built outside a MasterSolutionLibrary behave exactly
+// as they did before generation stamping was introduced.
+TEST(CachingLibraryGeneration, smoke_CacheWithoutGenerationStillCaches)
+{
+    MockProblem a{16};
+
+    auto                                      sub = std::make_shared<MockSubLibrary>();
+    CachingLibrary<MockProblem, MockSolution> library(sub);
+    auto                                      gpu = makeGpu();
+
+    (void)library.findBestSolution(a, gpu);
+    (void)library.findBestSolution(a, gpu);
+
+    EXPECT_EQ(sub->findBestCalls, 1)
+        << "the generation argument is optional; omitting it must not disable caching.";
+}
+
+// ---------------------------------------------------------------------------
+// Index space partition. The range a solution index falls in is what records
+// whether it came from the shipped library or from a runtime registration, so
+// the boundary is a contract rather than an implementation detail.
+// ---------------------------------------------------------------------------
+TEST(UserKernelIndexSpace, smoke_PartitionBoundary)
+{
+    EXPECT_EQ(UserKernelIndexBase, 1 << 30);
+
+    EXPECT_FALSE(isUserKernelIndex(0));
+    EXPECT_FALSE(isUserKernelIndex(1));
+    EXPECT_FALSE(isUserKernelIndex(UserKernelIndexBase - 1))
+        << "the last system index must not be mistaken for a user kernel.";
+
+    EXPECT_TRUE(isUserKernelIndex(UserKernelIndexBase));
+    EXPECT_TRUE(isUserKernelIndex(UserKernelIndexBase + 1));
+
+    // Indices are int, so every index in the user range [2^30, 2^31) has to be
+    // representable as a positive int. The range ends exactly at INT32_MAX,
+    // which leaves 2^30 usable slots.
+    EXPECT_GT(UserKernelIndexBase, 0);
+    EXPECT_LE(static_cast<int64_t>(UserKernelIndexBase) * 2 - 1, INT32_MAX);
 }

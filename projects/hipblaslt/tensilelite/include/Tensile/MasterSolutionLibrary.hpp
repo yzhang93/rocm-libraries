@@ -33,7 +33,9 @@
 #include <memory>
 
 #include <Tensile/Debug.hpp>
+#include <Tensile/LibraryGeneration.hpp>
 #include <Tensile/SolutionLibrary.hpp>
+#include <Tensile/UserKernelIndex.hpp>
 #include <Tensile/Tensile.hpp>
 #include <Tensile/TensorOps.hpp>
 
@@ -108,6 +110,12 @@ namespace TensileLite
         mutable std::mutex                                      solutionsGuard;
         mutable std::atomic<bool>                               lastFindTopRetAll = false;
 
+        // Shared with the CachingLibrary that wraps `library`, so a change to a
+        // mutable tier below the memo can invalidate stale entries without
+        // walking or erasing them. Never null: the cache holds a copy of this
+        // shared_ptr and reads it on every lookup.
+        std::shared_ptr<LibraryGeneration> generation = std::make_shared<LibraryGeneration>();
+
         MasterSolutionLibrary() = default;
 
         bool initLibraryMapping(const std::string& tensileLibPath)
@@ -150,6 +158,14 @@ namespace TensileLite
 
         void loadLibrary(const int index) const
         {
+            // Registered user kernels live in `solutions` already and have no
+            // entry in the mapping, which only describes shards on disk. The
+            // lookup below cannot express that: for an index above every system
+            // key, upper_bound returns end(), and the decrement then loads an
+            // unrelated shard (the same above-largest miss as TODO(#7080)).
+            if(isUserKernelIndex(index))
+                return;
+
             // TODO(#7080): point-key + upper_bound misses on above-largest and
             // gap-between-keys; switch to range-encoded mapping.
             auto it = libraryMapping.upper_bound(index);

@@ -1960,6 +1960,30 @@ namespace TensileLite
                 }
             };
 
+            /**
+             * Marks the user kernel library row at the head of the selection
+             * ladder. Like the other *Matching predicates it carries no
+             * matching logic and returns true unconditionally; the exact
+             * [M, N, batch, K] lookup happens in the sub-library beneath the
+             * row, which yields nothing on a miss so selection falls through.
+             *
+             * Derives from EqualityMatching so the four dynamic_cast tagging
+             * sites in ExactLogicLibrary give user solutions
+             * MatchingTag::Equal. That is what makes rocblaslt_matmul_is_tuned
+             * report a registered kernel as tuned, on the reasoning that an
+             * exact user mapping is the same claim as a system Equality entry.
+             *
+             * type() cannot be renamed to distinguish this row: Property_CRTP
+             * declares it final and binds it to EqualityMatching::Type(), so
+             * this predicate also reports "EqualityMatching". Anything needing
+             * to single out the user row must use dynamic_cast, as the
+             * prediction-mode skip in findTopSolutions does.
+             */
+            struct UserExactMatching : public EqualityMatching
+            {
+                UserExactMatching() = default;
+            };
+
             struct RangeMatching
                 : public Predicate_CRTP<RangeMatching, ContractionProblemGemm>
             {

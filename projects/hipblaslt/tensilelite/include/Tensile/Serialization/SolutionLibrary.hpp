@@ -190,8 +190,12 @@ namespace TensileLite
 
                 if(!iot::outputting(io))
                 {
-                    auto cache
-                        = std::make_shared<CachingLibrary<MyProblem, MySolution>>(innerLibrary);
+                    // The cache is built here rather than by the enclosing
+                    // library, so the generation counter has to be handed in at
+                    // construction: this is the only point where both the cache
+                    // and its MasterSolutionLibrary are in scope together.
+                    auto cache = std::make_shared<CachingLibrary<MyProblem, MySolution>>(
+                        innerLibrary, lib.generation);
 
                     lib.library = cache;
                 }
