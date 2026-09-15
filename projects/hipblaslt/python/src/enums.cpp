@@ -69,6 +69,14 @@ void init_enums(nb::module_& m)
         // member omitted here; extend this list when that test flags a gap.
     }
     {
+        // Needed to name a problem type for get_all_algos, which takes the
+        // transposes directly rather than reading them from a matmul desc.
+        nb::enum_<hipblasOperation_t> e(m, "Operation", nb::is_arithmetic());
+        reg(e, "Operation", "OP_N", HIPBLAS_OP_N);
+        reg(e, "Operation", "OP_T", HIPBLAS_OP_T);
+        reg(e, "Operation", "OP_C", HIPBLAS_OP_C);
+    }
+    {
         nb::enum_<hipblasLtMatmulDescAttributes_t> e(m, "MatmulDescAttr", nb::is_arithmetic());
         reg(e, "MatmulDescAttr", "TRANSA", HIPBLASLT_MATMUL_DESC_TRANSA);
         reg(e, "MatmulDescAttr", "TRANSB", HIPBLASLT_MATMUL_DESC_TRANSB);
