@@ -876,16 +876,21 @@ def build(
         py_dir = ROOT_PATH / "python"
         install_dir = (ROOT_PATH / "hipblaslt-install").as_posix()
         hipblaslt_cmake_dir = f"{install_dir}/lib/cmake/hipblaslt"
+        # Quoted as one argument: cmake.args is semicolon-separated, and an
+        # unquoted ';' is a shell command separator, which silently splits the
+        # -Dhipblaslt_DIR half off into its own (failing) command.
         config_settings = (
-            f"--config-settings=cmake.args=-DROCM_PATH={rocm_s};"
-            f"-Dhipblaslt_DIR={hipblaslt_cmake_dir}"
+            f'--config-settings="cmake.args=-DROCM_PATH={rocm_s};'
+            f'-Dhipblaslt_DIR={hipblaslt_cmake_dir}"'
         )
         with c.cd(str(py_dir)):
-            # Uses whichever pip/python is active when invoke build is called.
-            # Run `invoke build --python` from within `conda activate pydev313`
-            # (or equivalent) so this installs into the intended environment.
+            # Installs into the interpreter running this task rather than
+            # whichever pip is first on PATH: --config-settings needs pip >= 22.1
+            # and a distro pip is easily older than that, which fails with a bare
+            # "no such option" long after the expensive part of the build.
             c.run(
-                f"pip install --no-build-isolation -e . {config_settings}",
+                f"{sys.executable} -m pip install --no-build-isolation -e . "
+                f"{config_settings}",
                 env={"ROCM_PATH": rocm_s},
             )
 

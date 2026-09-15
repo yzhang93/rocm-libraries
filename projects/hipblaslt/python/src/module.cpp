@@ -18,6 +18,14 @@ NB_MODULE(_core, m)
 {
     m.doc() = "Low-level hipBLASLt bindings.";
     m.attr("__version__") = "0.1.0";
+    // The hipBLASLt include directory this module was compiled against, so
+    // header-derived tests can check the headers that actually produced these
+    // bindings rather than whichever SDK happens to be installed.
+#ifdef HIPBLASLT_PY_INCLUDE_DIR
+    m.attr("_hipblaslt_include_dir") = HIPBLASLT_PY_INCLUDE_DIR;
+#else
+    m.attr("_hipblaslt_include_dir") = nb::none();
+#endif
     m.def("hip_available", &hip_available,
           "Return True if at least one HIP device is visible.");
 

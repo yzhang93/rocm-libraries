@@ -40,4 +40,22 @@ nanobind_add_module(_core NB_SUPPRESS_WARNINGS
 target_include_directories(_core PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/src")
 target_link_libraries(_core PRIVATE hip::host roc::hipblaslt)
 
+# find_package(hip) contributes ${ROCM_PATH}/include as a system include, which
+# on a machine with hipBLASLt installed under ROCm shadows the hipblaslt_DIR we
+# were pointed at. The extension then compiles against the installed version's
+# headers while linking the one we built, so enum values and newly added
+# entry points silently disagree with the library actually loaded at runtime.
+# Re-add hipBLASLt's own include dirs as non-system -I so they are searched
+# first, since -I precedes -isystem in the header search order.
+get_target_property(hipblaslt_interface_includes
+    roc::hipblaslt INTERFACE_INCLUDE_DIRECTORIES)
+if(hipblaslt_interface_includes)
+    target_include_directories(_core BEFORE PRIVATE ${hipblaslt_interface_includes})
+    # Recorded so the coverage tests can parse the same headers the extension
+    # was compiled against instead of guessing at ${ROCM_PATH}.
+    list(GET hipblaslt_interface_includes 0 hipblaslt_primary_include)
+    target_compile_definitions(_core PRIVATE
+        HIPBLASLT_PY_INCLUDE_DIR="${hipblaslt_primary_include}")
+endif()
+
 install(TARGETS _core DESTINATION hipblaslt)

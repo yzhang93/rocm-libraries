@@ -18,6 +18,8 @@ ALLOWED_MISSING = {
     "hipblasLtEpilogue_t": {
         130,    # HIPBLASLT_EPILOGUE_RELU_AUX
         134,    # HIPBLASLT_EPILOGUE_RELU_AUX_BIAS
+        136,    # HIPBLASLT_EPILOGUE_DRELU
+        152,    # HIPBLASLT_EPILOGUE_DRELU_BGRAD
         160,    # HIPBLASLT_EPILOGUE_GELU_AUX
         164,    # HIPBLASLT_EPILOGUE_GELU_AUX_BIAS
         192,    # HIPBLASLT_EPILOGUE_DGELU
@@ -32,21 +34,24 @@ ALLOWED_MISSING = {
         131204, # HIPBLASLT_EPILOGUE_CLAMP_AUX_BIAS_EXT
         262148, # HIPBLASLT_EPILOGUE_SIGMOID_BIAS_EXT
     },
-    # ScaleMode: VEC16_UE4M3 (1) and the "not supported yet" entries
-    # VEC128_32F (4), BLK128x128_32F (5), and the sentinel END (6) are not
-    # bound. BLK32_UE8M0_32_8_EXT (1001) is version-gated (>1.2.x) and is
-    # not present in the installed 1.2.2 header at all.
+    # ScaleMode: the bound set is SCALAR_32F, VEC32_UE8M0, OUTER_VEC_32F and
+    # (version-gated) BLK32_UE8M0_32_8_EXT. Everything else is either marked
+    # "not supported yet" in the header or is the END sentinel.
     "hipblasLtMatmulMatrixScale_t": {
-        1,  # HIPBLASLT_MATMUL_MATRIX_SCALE_VEC16_UE4M3 — not supported yet
-        4,  # HIPBLASLT_MATMUL_MATRIX_SCALE_VEC128_32F — not supported yet
-        5,  # HIPBLASLT_MATMUL_MATRIX_SCALE_BLK128x128_32F — not supported yet
-        6,  # HIPBLASLT_MATMUL_MATRIX_SCALE_END — sentinel, not a real mode
+        1,     # HIPBLASLT_MATMUL_MATRIX_SCALE_VEC16_UE4M3 — not supported yet
+        4,     # HIPBLASLT_MATMUL_MATRIX_SCALE_VEC128_32F — not supported yet
+        5,     # HIPBLASLT_MATMUL_MATRIX_SCALE_BLK128x128_32F — not supported yet
+        6,     # END sentinel in <=1.2 headers, where the EXT block did not exist
+        1002,  # HIPBLASLT_MATMUL_MATRIX_SCALE_VEC16_UE8M0_EXT — not supported yet
+        1003,  # HIPBLASLT_MATMUL_MATRIX_SCALE_VEC32_UE4M3_EXT — not supported yet
+        1004,  # HIPBLASLT_MATMUL_MATRIX_SCALE_VEC16_UE5M3_EXT — not supported yet
+        1005,  # HIPBLASLT_MATMUL_MATRIX_SCALE_VEC32_UE5M3_EXT — not supported yet
+        1006,  # HIPBLASLT_MATMUL_MATRIX_SCALE_END — sentinel, not a real mode
     },
-    # MatmulDescAttr: only the subset needed for basic GEMM dispatch is bound.
-    # The unbound members are: BIAS_DATA_TYPE (4), C_SCALE_POINTER (7),
-    # EPILOGUE_AUX_* (9-12), POINTER_MODE (13), AMAX_D_POINTER (14),
-    # EPILOGUE_AUX_DATA_TYPE (22), COMPUTE_INPUT_TYPE_*_EXT (100, 101),
-    # EPILOGUE_ACT_ARG*_EXT (102, 103), and the sentinel MAX (104).
+    # MatmulDescAttr: only the subset needed for basic GEMM dispatch is bound;
+    # the rest are auxiliary-output, scaling, and tuning-hint attributes that
+    # the Python API does not surface yet. Note the MAX sentinel moved from 104
+    # to 106 as the _EXT block grew, so both values are listed.
     "hipblasLtMatmulDescAttributes_t": {
         4,   # HIPBLASLT_MATMUL_DESC_BIAS_DATA_TYPE
         7,   # HIPBLASLT_MATMUL_DESC_C_SCALE_POINTER
@@ -57,26 +62,31 @@ ALLOWED_MISSING = {
         13,  # HIPBLASLT_MATMUL_DESC_POINTER_MODE
         14,  # HIPBLASLT_MATMUL_DESC_AMAX_D_POINTER
         22,  # HIPBLASLT_MATMUL_DESC_EPILOGUE_AUX_DATA_TYPE
+        23,  # HIPBLASLT_MATMUL_DESC_BIAS_BATCH_STRIDE
+        33,  # HIPBLASLT_MATMUL_DESC_SM_COUNT_TARGET
         100, # HIPBLASLT_MATMUL_DESC_COMPUTE_INPUT_TYPE_A_EXT
         101, # HIPBLASLT_MATMUL_DESC_COMPUTE_INPUT_TYPE_B_EXT
         102, # HIPBLASLT_MATMUL_DESC_EPILOGUE_ACT_ARG0_EXT
         103, # HIPBLASLT_MATMUL_DESC_EPILOGUE_ACT_ARG1_EXT
-        104, # HIPBLASLT_MATMUL_DESC_MAX — sentinel
+        104, # STREAMK_TILE_SCHEDULING_EXT in >=1.4; the MAX sentinel in <=1.2
+        105, # HIPBLASLT_MATMUL_DESC_UNIFORM_SUMMATION_ORDER_EXT
+        106, # HIPBLASLT_MATMUL_DESC_MAX — sentinel
     },
 }
 
 
 def find_header():
-    """Locate hipblaslt.h, preferring the installed ROCm header.
+    """Locate the hipblaslt.h that the extension was compiled against.
 
-    The Python extension is compiled against the *installed* ROCm SDK, so the
-    installed header is the authoritative source for value checking.  The
-    in-tree header is used as a fallback for developer environments where no
-    ROCm SDK is installed (e.g. CI without a GPU node or header-only checks).
+    The build records its hipBLASLt include directory on the extension module,
+    which is the only reliable answer: a developer build links a freshly built
+    hipBLASLt while an older copy may still sit under ``$ROCM_PATH``, and
+    parsing the wrong one reports bound values as missing from the header.
 
     Search order:
-    1. ``$ROCM_PATH/include/hipblaslt/hipblaslt.h`` (or ``/opt/rocm``).
-    2. Walk up from this file's location to find the in-tree header at
+    1. The include directory recorded at build time by ``_core``.
+    2. ``$ROCM_PATH/include/hipblaslt/hipblaslt.h`` (or ``/opt/rocm``).
+    3. Walk up from this file's location to find the in-tree header at
        ``library/include/hipblaslt/hipblaslt.h`` (developer build fallback).
 
     Returns a :class:`pathlib.Path` to the first found header.
@@ -84,8 +94,17 @@ def find_header():
     """
     candidates = []
 
-    # Installed ROCm header — preferred because the extension is compiled
-    # against the installed SDK, so values are guaranteed to match.
+    # Build-time include dir: matches the headers that produced the bindings.
+    try:
+        from . import _core
+
+        build_dir = getattr(_core, "_hipblaslt_include_dir", None)
+        if build_dir:
+            candidates.append(Path(build_dir) / "hipblaslt" / "hipblaslt.h")
+    except ImportError:
+        # Header-only checks can run without a built extension.
+        pass
+
     rocm = os.environ.get("ROCM_PATH", "/opt/rocm")
     candidates.append(Path(rocm) / "include" / "hipblaslt" / "hipblaslt.h")
 
@@ -129,6 +148,13 @@ def header_enum_values(header_path, enum_type):
     """
     text = Path(header_path).read_text()
 
+    # Strip comments before locating the enum, not after: doc comments contain
+    # braces (e.g. "values outside ``{0, 1, 2}`` are rejected"), and the body
+    # pattern below stops at the first '}' it sees, so a braced comment would
+    # otherwise hide the whole enum.
+    text = re.sub(r"/\*.*?\*/", "", text, flags=re.DOTALL)
+    text = re.sub(r"//[^\n]*", "", text)
+
     # Match: typedef enum { ... } enum_type;
     # Use [^}]* instead of .*? to avoid spanning across multiple enum blocks
     # when the file contains several consecutive typedef enums (re.DOTALL would
@@ -144,10 +170,6 @@ def header_enum_values(header_path, enum_type):
         raise ValueError(f"enum {enum_type!r} not found in {header_path}")
 
     body = match.group("body")
-
-    # Strip block comments then line comments before tokenising.
-    body = re.sub(r"/\*.*?\*/", "", body, flags=re.DOTALL)
-    body = re.sub(r"//[^\n]*", "", body)
 
     values: dict[str, int] = {}
     current = -1

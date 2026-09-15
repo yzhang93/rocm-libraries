@@ -17,8 +17,10 @@ def _fp8_gemm(a_dtype, mld_type):
     ref = a8.astype(np.float32) @ b8.astype(np.float32)
     with c.Handle() as h:
         desc = c.MatmulDesc(c.ComputeType.COMPUTE_32F, c.DataType.R_32F)
-        dA = c.DeviceArray.from_numpy(np.ascontiguousarray(a8.T), a_dtype)
-        dB = c.DeviceArray.from_numpy(np.ascontiguousarray(b8.T), a_dtype)
+        # ml_dtypes arrays go through the package-level helper, which view-casts
+        # them to a plain uint wire dtype; nanobind rejects the extension dtypes.
+        dA = hipblaslt.from_numpy(np.ascontiguousarray(a8.T), a_dtype)
+        dB = hipblaslt.from_numpy(np.ascontiguousarray(b8.T), a_dtype)
         dC = c.DeviceArray.from_numpy(np.zeros((n, m), np.float32), c.DataType.R_32F)
         dD = c.DeviceArray.from_numpy(np.zeros((n, m), np.float32), c.DataType.R_32F)
         la = c.MatrixLayout(a_dtype, m, k, m)
@@ -36,12 +38,18 @@ def _fp8_gemm(a_dtype, mld_type):
 
 @requires_gpu
 def test_fnuz_fp8_gemm():
-    # RUNS on gfx942 / MI300 (FNUZ is the MI300 fp8 format).
+    # RUNS on gfx942 / MI300 (FNUZ is the MI300 fp8 format). gfx950 ships the
+    # OCP formats instead and has no FNUZ kernels, so it skips there.
     fnuz = getattr(c.DataType, "R_8F_E4M3_FNUZ", None)
     mld = getattr(ml_dtypes, "float8_e4m3fnuz", None)
     if fnuz is None or mld is None:
         pytest.skip("FNUZ fp8 unavailable in this build/ml_dtypes")
-    out, ref = _fp8_gemm(fnuz, mld)
+    try:
+        out, ref = _fp8_gemm(fnuz, mld)
+    except c.HipblasLtError as e:
+        if "NOT_SUPPORTED" in str(e):
+            pytest.skip(f"FNUZ fp8 GEMM unsupported on this arch: {e}")
+        raise
     np.testing.assert_allclose(out, ref, rtol=0.1, atol=0.1)
 
 
