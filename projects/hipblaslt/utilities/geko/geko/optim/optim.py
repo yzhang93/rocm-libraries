@@ -128,6 +128,7 @@ def configure(
     arch: str = "gfx950",
     backend: str = "ductile",
     search_space: str | None = None,
+    config_overrides: dict | None = None,
 ) -> dict:
     """Generate tuning YAML configs for one or more GEMM types.
 
@@ -148,6 +149,9 @@ def configure(
             Defaults to "ductile".
         search_space (str, optional): "heuristic", "generic", or None 
             (auto-inferred from backend).
+        config_overrides (dict, optional): Extra generator settings (for
+            example from a --list tuning YAML). Applied before the explicit
+            arguments above, so those still win.
 
     Returns:
         dict: The fully populated config dict (after defaults and the
@@ -171,11 +175,15 @@ def configure(
             f"TRANSA={gt.transA} TRANSB={gt.transB} gemm_name={gt.gemm_name}"
         )
 
-    config: dict = {
+    config: dict = dict(config_overrides or {})
+    config.update({
         "ARCH": arch,
         "backend": backend.lower(),
-        "search_space": search_space,
-    }
+    })
+    # None means "not requested"; leave any value the overrides carried so it
+    # can still be resolved from the backend by apply_input_config_defaults.
+    if search_space is not None or "search_space" not in config:
+        config["search_space"] = search_space
     config["GemmProblems"] = gcs
 
     output_dir = Path(output_dir)

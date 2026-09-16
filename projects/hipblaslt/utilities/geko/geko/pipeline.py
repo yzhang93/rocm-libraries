@@ -297,6 +297,7 @@ def run_configure(
     verbose: int = 1,
     bench_freq: bool = False,
     device: int | None = None,
+    config_overrides: dict | None = None,
 ) -> None:
     """Summarize the workload log, then write tuning YAML under workdir/optimizations.
 
@@ -317,6 +318,8 @@ def run_configure(
         bench_freq: Forwarded to bench.log.summarize when keep_thr > 0
             (controls HIPBLASLT_BENCH_FREQ); ignored when keep_thr == 0
             because that branch skips benchmarking.
+        config_overrides: Generator settings carried over from a --list tuning
+            YAML (everything the pipeline does not derive itself).
 
         device: Backward-compatible single-device alias. If set, overrides devices.
 
@@ -382,6 +385,7 @@ def run_configure(
         arch=arch,
         backend=backend,
         search_space=search_space,
+        config_overrides=config_overrides,
     )
     n_configs = len(gemm_configs)
 

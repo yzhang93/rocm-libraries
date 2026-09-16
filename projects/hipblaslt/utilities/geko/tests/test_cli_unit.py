@@ -223,7 +223,7 @@ def test_dispatch_search_uses_generated_workload_from_list(
     monkeypatch.setattr(
         cli,
         "_rows_from_gemm_config_yaml",
-        lambda _path, _arch: [{"M": 16, "N": 16, "K": 16}],
+        lambda _path, _arch: ([{"M": 16, "N": 16, "K": 16}], {}),
     )
 
     captured = {}
