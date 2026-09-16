@@ -448,6 +448,12 @@ class Library:
         if "F32XdlMathOp" in self.problem and self.problem["F32XdlMathOp"] == 9:  # TF32
             common["math_mode"] = 1
 
+        # A ScaleAlphaVec-only library (the RMSNorm scale-apply consumer) is
+        # gated behind a predicate on the scaleAlphaVec argument, so the sweep
+        # has to pass it or none of the tuned kernels match the problem.
+        if self.problem.get("UseScaleAlphaVec", 0) and not self.problem.get("UseBias", 0):
+            common["scaleAlpha_vector"] = True
+
         gemms = []
         latency = []
         for size in self.sizes:
