@@ -169,7 +169,9 @@ class BasePostProcessor(BaseParamBuilder):
             for name in overrides:
                 entry.pop(name, None)
 
-        return [entry for entry in mi_groups if _mi_supports_rms_epilogue(entry)]
+        mi_groups = [entry for entry in mi_groups if _mi_supports_rms_epilogue(entry)]
+
+        return fork_params, mi_groups
 
 
 def _mi_matches_mt(entry: Dict[str, ForkParameter], fixed_MT0: int, fixed_MT1: int) -> bool:
