@@ -118,8 +118,21 @@ def load_collection(lib_dir: str | Path) -> LibraryCollection:
 
 
 def _library_supports_epilogues(lib: Library) -> bool:
-    """Return False for f64 and complex libraries; epilogues are not supported."""
+    """Return False for f64 and complex libraries; epilogues are not supported.
+
+    RMSEpilogue libraries are excluded too: the fused RMSNorm epilogue owns the
+    store path, so the kernels were tuned (and can only be assembled) without
+    the bias/activation/scaleAlphaVec arguments this would bolt on.
+
+    ScaleAlphaVec-only libraries (the RMSNorm scale-apply consumer) are excluded
+    for the same reason: their kernels carry the scaleAlphaVec argument alone,
+    so advertising bias and activation support would not match the assembly.
+    """
     _NO_EPILOGUE_TYPES = ("f64_r", "f32_c", "f64_c")
+    if lib.problem.get("UseRMSEpilogue", False):
+        return False
+    if lib.problem.get("UseScaleAlphaVec", 0) and not lib.problem.get("UseBias", 0):
+        return False
     data_type = lib.problem.get("DataType")
     return INDEX_TYPE_MAP.get(data_type) not in _NO_EPILOGUE_TYPES
 

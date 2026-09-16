@@ -44,10 +44,40 @@ class ConfigSectionGenerator:
         """Estimate iteration count for benchmarking based on problem size."""
         return max(round((-(m + n + k) * 0.015 + 431) / b), 5)
 
+    def _use_rms_epilogue(self) -> bool:
+        """Whether the fused RMSNorm (MegaFused) epilogue is enabled."""
+        return self.config.get("RMS_EPILOGUE", False)
+
+    def _scale_alpha_vec_only(self) -> bool:
+        """Whether to emit ScaleAlphaVec as the sole epilogue.
+
+        This matches the RMSNorm scale-apply consumer GEMM, which carries the
+        per-row rstd in the scaleAlphaVec slot and uses no bias or activation.
+        """
+        return self.config.get("SCALE_ALPHA_VEC_ONLY", False)
+
+    def _scale_alpha_vec_dim(self) -> int:
+        """Factor dimension carried in the ScaleAlphaVec slot.
+
+        The classic epilogue scales along free0. The scale-apply consumer
+        scales per token, and the caller-owned RMSNorm layout puts tokens on
+        free1 (D.N), so it needs dimension 2 instead.
+        """
+        if self._scale_alpha_vec_only():
+            return int(self.config.get("SCALE_ALPHA_VEC_DIM", 2))
+        return 1
+
     def _use_epilogues(self) -> bool:
-        """Whether to emit epilogue fields for this GEMM type."""
+        """Whether to emit epilogue fields for this GEMM type.
+
+        The fused RMSNorm epilogue owns the store path, so the classic
+        bias/activation/ScaleAlphaVec epilogue fields are suppressed: the
+        tuned RMSEpilogue solutions are generated without them.
+        """
         gt = self._gt
         no_epilogue = (gt.data_type == "D" and gt.dest_data_type == "D") or gt.data_type in ("C", "Z")
+        if self._use_rms_epilogue() or self._scale_alpha_vec_only():
+            return False
         return self.config["EPILOGUES"] and not no_epilogue
 
     def __init__(self, config: Dict[str, Any]) -> None:
@@ -89,18 +119,26 @@ class ConfigSectionGenerator:
         if self._gt.data_type in ("C", "Z"):
             pt['ComplexConjugateA'] = "True" if self._gt.transA == "C" else "False"
             pt['ComplexConjugateB'] = "True" if self._gt.transB == "C" else "False"
-        pt['UseBeta'] = "True"
+        pt['UseBeta'] = "True" if self.config.get("USE_BETA", True) else "False"
 
         epi_tag = "" if self._use_epilogues() else "#"
+        sav_tag = "" if (self._use_epilogues() or self._scale_alpha_vec_only()) else "#"
         pt[f'{epi_tag}Activation'] = "True"
         pt[f'{epi_tag}ActivationHPA'] = "True"
         pt[f'{epi_tag}ActivationType'] = "hipblaslt_all"
-        pt[f'{epi_tag}UseScaleAlphaVec'] = "1"
+        pt[f'{sav_tag}UseScaleAlphaVec'] = str(self._scale_alpha_vec_dim())
         pt[f'{epi_tag}UseBias'] = "1"
         if "8" in pt["DataType"] or "8" in pt["DestDataType"]:
             pt[f'{epi_tag}UseScaleAB'] = "Scalar"
 
         pt['Batched'] = "True"
+
+        if self._use_rms_epilogue():
+            # ProblemType-level dispatch predicate (UseRMSEpilogue); the matching
+            # solution-level RMSEpilogue parameter is forced by the fork-param
+            # post-processor. MegaFusedEmit folds residual add, the bf16
+            # writeback and MXFP8 quant into this one flag.
+            pt['UseRMSEpilogue'] = "True"
 
         if self._is_tf32(self._gt.data_type) and self._gt.data_type != "X1":
             pt['F32XdlMathOp'] = self._gt.data_type

@@ -520,6 +520,21 @@ def run_optimize(
     merged_libs.dump(lib_dir)
     logger.info(f"Merged library available in: '{lib_dir}'")
 
+    # hipblaslt-bench drives the sweep below through the plain GEMM API, which
+    # has no way to pass the fused RMSNorm arguments, so it cannot benchmark or
+    # validate these kernels. The merged library is the deliverable; the winner
+    # per size is already the one the tuning backend measured.
+    if any(lib.problem.get("UseRMSEpilogue", False) for lib in merged_libs):
+        logger.warning(
+            "RMSEpilogue library: skipping the post-optimization hipblaslt-bench "
+            "sweep (the bench client cannot express the fused RMSNorm epilogue). "
+            "Tuned kernels are in '%s'.", lib_dir,
+        )
+        logger.info("Optimization workflow completed successfully!")
+        state.optimized = True
+        state.dump(state_path)
+        return
+
     results_dir = workdir / "results"
     if results_dir.is_dir():
         shutil.rmtree(results_dir)

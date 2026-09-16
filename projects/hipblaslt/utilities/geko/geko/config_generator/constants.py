@@ -328,6 +328,9 @@ REQUIRED_CONFIG_FIELDS = ["TRANSA", "TRANSB", "DataType", "DestDataType", "Compu
 # User YAML overrides via ``setdefault`` in ``load_input_config._prepare_config``.
 # To add or change per-ARCH optional defaults, edit ``CONFIG_DEFAULTS_BY_ARCH`` below.
 _CONFIG_OPTIONAL_COMMON = {
+    "RMS_EPILOGUE": False,
+    "RMS_EPILOGUE_GAMMA_TYPE": "b",
+    "RMS_EPILOGUE_RESIDUAL_TYPE": "b",
     "StreamK": True,
     "search_space": None,
     "MACROTILE_OPT": False,
@@ -337,6 +340,9 @@ _CONFIG_OPTIONAL_COMMON = {
     "ONE_SIZE_PER_CONFIG": True,
     "MI_FILTER": 2,
     "EPILOGUES": True,
+    "SCALE_ALPHA_VEC_ONLY": False,
+    "SCALE_ALPHA_VEC_DIM": 2,
+    "USE_BETA": True,
     "CLUSTER": 0,
     "DUCTILE_VALIDATION_PROFILE": 1,
 }
