@@ -57,6 +57,8 @@ class BasePostProcessor(BaseParamBuilder):
         # the parameters the fused epilogue pins.
         if self.config.get("RMS_EPILOGUE", False):
             fork_params, mi_groups = self._apply_rms_epilogue(fork_params, mi_groups)
+        elif self.config.get("MX", False):
+            fork_params, mi_groups = self._apply_mx_gemm(fork_params, mi_groups)
         return fork_params, mi_groups
 
     # -----------------------------------------------------------------
@@ -147,12 +149,9 @@ class BasePostProcessor(BaseParamBuilder):
         if pgr is not None:
             overrides["PrefetchGlobalRead"] = [v for v in pgr.values if v in (0, 1, 2)] or [2]
 
-        # Subtile needs DepthU to be a multiple of 2 * MatrixInstK * LocalSplitU,
-        # which is 64 for the 16x16x32 bf16/f16 instruction required below.
-        du = fork_params.get("DepthU")
-        if du is not None:
-            overrides["DepthU"] = [v for v in du.values if v % 64 == 0] or [64]
-
+        # Subtile needs DepthU to be a multiple of 2 * MatrixInstK * LocalSplitU.
+        # That is 64 for 16x16x32 bf16/f16, and 256 for 16x16x128 MXFP8. The
+        # actual K is taken from the surviving MI groups below.
         for name, values in overrides.items():
             if name in fork_params:
                 fork_params[name].values = values
@@ -171,6 +170,67 @@ class BasePostProcessor(BaseParamBuilder):
 
         mi_groups = [entry for entry in mi_groups if _mi_supports_rms_epilogue(entry)]
 
+        inst_ks = [
+            MFMA.from_list(entry["MatrixInstruction"].values).K
+            for entry in mi_groups
+        ]
+        if inst_ks:
+            du_mult = 2 * max(inst_ks)
+            du = fork_params.get("DepthU")
+            if du is not None:
+                du.values = [v for v in du.values if v % du_mult == 0] or [du_mult]
+
+        return fork_params, mi_groups
+
+    # -----------------------------------------------------------------
+    # MX GEMMs without the fused RMS epilogue (e.g. ScaleAlphaVec consumer)
+    # -----------------------------------------------------------------
+
+    def _apply_mx_gemm(
+        self,
+        fork_params: Dict[str, ForkParameter],
+        mi_groups: GroupDimension,
+    ) -> Tuple[Dict[str, ForkParameter], GroupDimension]:
+        """Keep MXFP8 samples in the legal DepthU / PGR region.
+
+        Random GA sampling otherwise spends its iteration budget on DepthU
+        values smaller than 2*MatrixInstK (32/64/128 for 16x16x128) and on
+        CMS tiles whose handwritten schedules do not cover MX block scaling,
+        which yields a 0-sized initial population.
+        """
+        overrides: Dict[str, List] = {
+            "UseSubtileImpl": [True],
+            "MIArchVgpr": [False],
+            "PrefetchAcrossPersistent": [0],
+            "UseCustomMainLoopSchedule": [0],
+            "StreamK": [0],
+            "StoreVectorWidth": [-1],
+            "NumElementsPerBatchStore": [0],
+        }
+        pgr = fork_params.get("PrefetchGlobalRead")
+        if pgr is not None:
+            overrides["PrefetchGlobalRead"] = [v for v in pgr.values if v in (0, 1, 2)] or [2]
+        for name, values in overrides.items():
+            if name in fork_params:
+                fork_params[name].values = values
+            else:
+                fork_params[name] = self._make_param(name, values)
+
+        mi_groups = [entry for entry in mi_groups if not _mi_is_cms(entry)]
+        for entry in mi_groups:
+            for name in overrides:
+                entry.pop(name, None)
+        mi_groups = [entry for entry in mi_groups if _mi_supports_rms_epilogue(entry)]
+
+        inst_ks = [
+            MFMA.from_list(entry["MatrixInstruction"].values).K
+            for entry in mi_groups
+        ]
+        if inst_ks:
+            du_mult = 2 * max(inst_ks)
+            du = fork_params.get("DepthU")
+            if du is not None:
+                du.values = [v for v in du.values if v % du_mult == 0] or [du_mult]
         return fork_params, mi_groups
 
 
