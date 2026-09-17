@@ -28,6 +28,7 @@
 
 #include <atomic>
 #include <cstdint>
+#include <memory>
 
 namespace TensileLite
 {
@@ -51,4 +52,26 @@ namespace TensileLite
     {
         std::atomic<uint64_t> value{0};
     };
+
+    /**
+     * The one counter for the process.
+     *
+     * It has to be process-global rather than per-MasterSolutionLibrary,
+     * because a lazily loaded library is not one MasterSolutionLibrary but
+     * many: PlaceholderLibrary deserializes each shard through its own
+     * LoadLibraryFile call, and each shard brings its own CachingLibrary memo
+     * nested below the top-level one. A registration must invalidate all of
+     * them, and a per-library counter would leave every memo but one serving
+     * pre-registration answers.
+     *
+     * This matches the scope the design gives the user kernel library: one per
+     * process, because the library and its caches are reached through a
+     * function-local static in get_library_and_adapter.
+     */
+    inline std::shared_ptr<LibraryGeneration> globalLibraryGeneration()
+    {
+        static std::shared_ptr<LibraryGeneration> instance
+            = std::make_shared<LibraryGeneration>();
+        return instance;
+    }
 } // namespace TensileLite

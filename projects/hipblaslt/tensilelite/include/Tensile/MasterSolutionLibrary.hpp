@@ -36,6 +36,7 @@
 #include <Tensile/LibraryGeneration.hpp>
 #include <Tensile/SolutionLibrary.hpp>
 #include <Tensile/UserKernelIndex.hpp>
+#include <Tensile/UserKernelLibrary.hpp>
 #include <Tensile/Tensile.hpp>
 #include <Tensile/TensorOps.hpp>
 
@@ -112,9 +113,17 @@ namespace TensileLite
 
         // Shared with the CachingLibrary that wraps `library`, so a change to a
         // mutable tier below the memo can invalidate stale entries without
-        // walking or erasing them. Never null: the cache holds a copy of this
-        // shared_ptr and reads it on every lookup.
-        std::shared_ptr<LibraryGeneration> generation = std::make_shared<LibraryGeneration>();
+        // walking or erasing them. Process-global rather than owned here,
+        // because a lazily loaded library is many MasterSolutionLibrary objects
+        // with a nested memo apiece and a registration has to invalidate all of
+        // them.
+        std::shared_ptr<LibraryGeneration> generation = globalLibraryGeneration();
+
+        // The user kernel tier sitting at the head of every row ladder in this
+        // library, and the target of every registration. Also process-global,
+        // for the same reason.
+        std::shared_ptr<UserKernelLibrary<MyProblem, MySolution>> userLibrary
+            = globalUserKernelLibrary<MyProblem, MySolution>();
 
         MasterSolutionLibrary() = default;
 

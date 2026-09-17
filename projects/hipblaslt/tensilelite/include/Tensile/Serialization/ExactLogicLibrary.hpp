@@ -30,7 +30,10 @@
 #include <Tensile/Serialization/Predicates.hpp>
 
 #include <Tensile/ExactLogicLibrary.hpp>
+#include <Tensile/MasterSolutionLibrary.hpp>
+#include <Tensile/UserKernelLibrary.hpp>
 
+#include <memory>
 #include <set>
 #include <type_traits>
 
@@ -57,15 +60,48 @@ namespace TensileLite
         template <typename MyProblem, typename MySolution, typename IO>
         struct MappingTraits<ProblemSelectionLibrary<MyProblem, MySolution>, IO>
         {
-            using Library = ProblemSelectionLibrary<MyProblem, MySolution>;
-            using iot     = IOTraits<IO>;
+            using Library   = ProblemSelectionLibrary<MyProblem, MySolution>;
+            using iot       = IOTraits<IO>;
+            using UserTier  = UserKernelLibrary<MyProblem, MySolution>;
 
             static void mapping(IO& io, Library& lib)
             {
                 iot::mapRequired(io, "rows", lib.rows);
+
+                // The user tier is installed here, at deserialization, and
+                // never later: `rows` is a bare vector walked without a lock at
+                // six sites, so inserting into it once GEMMs are running is a
+                // data race. The row is therefore always present and all
+                // mutability lives inside it, behind a snapshot swap.
+                //
+                // Not written back out: on the output path the row would be
+                // serialized as an ordinary EqualityMatching row, since its
+                // predicate cannot report a distinct type. Libraries are only
+                // ever read in this codebase, but guard anyway.
+                if(!iot::outputting(io))
+                    insertUserTier(io, lib);
             }
 
             const static bool flow = false;
+
+        private:
+            static void insertUserTier(IO&, Library& lib)
+            {
+                // The process-wide tier, not one per library: lazily loaded
+                // shards are deserialized later through their own
+                // LoadLibraryFile calls, so a per-library tier would be
+                // invisible to every ladder loaded after a registration.
+                typename Library::Base::Row row;
+                row.first  = ProblemPredicate<MyProblem>(
+                    std::make_shared<Predicates::Contraction::UserExactMatching>());
+                row.second = globalUserKernelLibrary<MyProblem, MySolution>();
+
+                // Head of the ladder: findBestSolution returns the first
+                // non-fallback hit, and findTopSolutions accumulates head-first,
+                // so this position is what puts a mapped user kernel at index 0
+                // ahead of every shipped tier.
+                lib.rows.insert(lib.rows.begin(), std::move(row));
+            }
         };
 
         template <typename MyProblem, typename MySolution, typename MyPredicate, typename IO>
