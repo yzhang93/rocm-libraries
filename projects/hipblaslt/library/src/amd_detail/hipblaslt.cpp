@@ -32,12 +32,15 @@
 #include "hipblaslt/hipblaslt-ext-op.h"
 #include "hipblaslt_internal.hpp"
 
+#include <Tensile/UserKernelIndex.hpp>
+#include <algorithm>
 #include <hip/hip_runtime_api.h>
 #include <iostream>
 #include <rocblaslt.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string>
+#include <vector>
 
 #include "Debug.hpp"
 
@@ -845,6 +848,117 @@ catch(...)
     }
     return exception_to_hipblas_status();
 }
+
+/*******************************************************************************
+ * User kernel library
+ ******************************************************************************/
+
+hipblasStatus_t hipblasLtUserKernelLibraryOpen(hipblasLtHandle_t handle, const char* path)
+try
+{
+    return RocBlasLtStatusToHIPStatus(
+        rocblaslt_user_kernel_library_open((rocblaslt_handle)handle, path));
+}
+catch(...)
+{
+    return exception_to_hipblas_status();
+}
+
+hipblasStatus_t hipblasLtUserKernelRefresh(hipblasLtHandle_t handle, int* numRegistered)
+try
+{
+    return RocBlasLtStatusToHIPStatus(
+        rocblaslt_user_kernel_refresh((rocblaslt_handle)handle, numRegistered));
+}
+catch(...)
+{
+    return exception_to_hipblas_status();
+}
+
+hipblasStatus_t hipblasLtUserKernelRegister(hipblasLtHandle_t handle,
+                                            const char*       libraryPath,
+                                            const char*       codeObjectPath,
+                                            int*              kernelIndices,
+                                            int               maxIndices,
+                                            int*              numIndices)
+try
+{
+    if(numIndices)
+        *numIndices = 0;
+
+    std::vector<int> assigned;
+    auto             status = rocblaslt_user_kernel_register(
+        (rocblaslt_handle)handle, libraryPath, codeObjectPath, assigned);
+
+    if(status != rocblaslt_status_success)
+        return RocBlasLtStatusToHIPStatus(status);
+
+    if(numIndices)
+        *numIndices = static_cast<int>(assigned.size());
+
+    // Reporting the full count while writing only what fits lets a caller size
+    // a buffer on a second call rather than guessing.
+    if(kernelIndices && maxIndices > 0)
+    {
+        const size_t n = std::min<size_t>(assigned.size(), static_cast<size_t>(maxIndices));
+        std::copy_n(assigned.begin(), n, kernelIndices);
+    }
+
+    return HIPBLAS_STATUS_SUCCESS;
+}
+catch(...)
+{
+    return exception_to_hipblas_status();
+}
+
+hipblasStatus_t hipblasLtUserKernelSetExactMatch(hipblasLtHandle_t handle,
+                                                 int               kernelIndex,
+                                                 size_t            m,
+                                                 size_t            n,
+                                                 size_t            batch,
+                                                 size_t            k)
+try
+{
+    return RocBlasLtStatusToHIPStatus(rocblaslt_user_kernel_set_exact_match(
+        (rocblaslt_handle)handle, kernelIndex, m, n, batch, k));
+}
+catch(...)
+{
+    return exception_to_hipblas_status();
+}
+
+hipblasStatus_t hipblasLtUserKernelGetCounts(hipblasLtHandle_t handle,
+                                             size_t*           registered,
+                                             size_t*           selectable)
+try
+{
+    return RocBlasLtStatusToHIPStatus(
+        rocblaslt_user_kernel_counts((rocblaslt_handle)handle, registered, selectable));
+}
+catch(...)
+{
+    return exception_to_hipblas_status();
+}
+
+hipblasStatus_t hipblasLtMatmulAlgoIsUserKernel(const hipblasLtMatmulAlgo_t* algo,
+                                                int*                         isUserKernel)
+try
+{
+    if(!algo || !isUserKernel)
+        return HIPBLAS_STATUS_INVALID_VALUE;
+
+    // The index is stored at the head of the algo's opaque data, the same
+    // place getIndexFromAlgo reads it from.
+    const int index = *reinterpret_cast<const int*>(algo->data);
+    *isUserKernel   = TensileLite::isUserKernelIndex(index) ? 1 : 0;
+
+    return HIPBLAS_STATUS_SUCCESS;
+}
+catch(...)
+{
+    return exception_to_hipblas_status();
+}
+
 
 #ifdef __cplusplus
 }

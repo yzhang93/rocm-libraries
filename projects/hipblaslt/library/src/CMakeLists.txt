@@ -27,6 +27,7 @@ target_sources(hipblaslt
         "${CMAKE_CURRENT_SOURCE_DIR}/amd_detail/rocblaslt/src/include/status.h"
         "${CMAKE_CURRENT_SOURCE_DIR}/amd_detail/rocblaslt/src/include/tuple_helper.hpp"
         "${CMAKE_CURRENT_SOURCE_DIR}/amd_detail/rocblaslt/src/include/tensile_host.hpp"
+        "${CMAKE_CURRENT_SOURCE_DIR}/amd_detail/rocblaslt/src/include/user_kernel_registry.hpp"
         "${CMAKE_CURRENT_SOURCE_DIR}/amd_detail/rocblaslt/src/include/UserDrivenTuningParser.hpp"
         "${CMAKE_CURRENT_SOURCE_DIR}/amd_detail/rocblaslt/src/include/utility.hpp"
 

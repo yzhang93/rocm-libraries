@@ -143,6 +143,41 @@ std::string getSolutionNameFromAlgoIndex(rocblaslt_handle             handle,
  ***********************************************************************************/
 std::atomic_bool& rocblaslt_internal_tensile_is_initialized();
 
+/***********************************************************************************
+ * User kernel library
+ *
+ * Registration adds a compiled kernel to the running process. A payload is a
+ * pair of files sharing a stem, which is the contract the lazy loader already
+ * uses: a msgpack library shard describing the solutions, and the code object
+ * holding them.
+ *
+ * Registering makes a kernel exist and returns indices that can be executed
+ * immediately through the ordinary index-based path. It does not make the
+ * kernel selectable; rocblaslt_user_kernel_set_exact_match does that, and only
+ * for the one shape it names. Keeping those separate is what lets a tuning loop
+ * benchmark a candidate through the real dispatch path and commit nothing if it
+ * loses.
+ ***********************************************************************************/
+rocblaslt_status rocblaslt_user_kernel_library_open(rocblaslt_handle handle, const char* path);
+
+rocblaslt_status rocblaslt_user_kernel_register(rocblaslt_handle  handle,
+                                                const char*       libraryPath,
+                                                const char*       codeObjectPath,
+                                                std::vector<int>& kernelIndices);
+
+rocblaslt_status rocblaslt_user_kernel_refresh(rocblaslt_handle handle, int* numRegistered);
+
+rocblaslt_status rocblaslt_user_kernel_set_exact_match(rocblaslt_handle handle,
+                                                       int              kernelIndex,
+                                                       size_t           m,
+                                                       size_t           n,
+                                                       size_t           batch,
+                                                       size_t           k);
+
+rocblaslt_status rocblaslt_user_kernel_counts(rocblaslt_handle handle,
+                                              size_t*          registered,
+                                              size_t*          selectable);
+
 /**********************************************
  * Whether to suppress Tensile error messages *
  **********************************************/

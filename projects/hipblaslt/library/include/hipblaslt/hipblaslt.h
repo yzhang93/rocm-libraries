@@ -1181,6 +1181,173 @@ hipblasStatus_t hipblasLtMatrixTransform(hipblasLtHandle_t              lightHan
                                          void*                   C,
                                          hipblasLtMatrixLayout_t Cdesc,
                                          hipStream_t             stream);
+
+/*! \ingroup library_module
+ *  \brief Bind this process to a durable user kernel library.
+ *
+ *  \details
+ *  Without this call, registration lasts only as long as the process. With it,
+ *  each registered payload is copied into a content-addressed store under
+ *  ``path`` and journalled, so \ref hipblasLtUserKernelRefresh can reinstate it
+ *  in a later run.
+ *
+ *  The path is always an argument and is never taken from the environment, so
+ *  which kernels a process will load cannot be redirected from outside it. A
+ *  directory that is group- or world-writable is refused: anything able to
+ *  write there could choose the code objects this process loads.
+ *
+ *  @param[in]
+ *  handle  Pointer to the allocated hipBLASLt handle.
+ *  @param[in]
+ *  path    Directory to use, created if absent.
+ *
+ *  \retval HIPBLAS_STATUS_SUCCESS        The library is open.
+ *  \retval HIPBLAS_STATUS_INVALID_VALUE  The path could not be used, or its
+ *                                        permissions are too broad.
+ */
+HIPBLASLT_EXPORT
+hipblasStatus_t hipblasLtUserKernelLibraryOpen(hipblasLtHandle_t handle, const char* path);
+
+/*! \ingroup library_module
+ *  \brief Reinstate everything recorded in the open library.
+ *
+ *  \details
+ *  Replays the journal: each stored payload is registered again and each
+ *  recorded exact-match mapping reapplied. A payload that cannot be used on
+ *  this device is skipped rather than failing the call, since a store may
+ *  legitimately hold objects built for another architecture.
+ *
+ *  Indices are assigned afresh, so those from a previous run do not reappear.
+ *  This is a read: it appends nothing to the journal.
+ *
+ *  @param[in]
+ *  handle         Pointer to the allocated hipBLASLt handle.
+ *  @param[out]
+ *  numRegistered  Number of kernels reinstated, or NULL if not wanted.
+ *
+ *  \retval HIPBLAS_STATUS_SUCCESS        The journal was replayed.
+ *  \retval HIPBLAS_STATUS_INVALID_VALUE  No library is open.
+ */
+HIPBLASLT_EXPORT
+hipblasStatus_t hipblasLtUserKernelRefresh(hipblasLtHandle_t handle, int* numRegistered);
+
+/*! \ingroup library_module
+ *  \brief Register a compiled kernel with the running process.
+ *
+ *  \details
+ *  A payload is a pair of files sharing a filename stem: a msgpack library
+ *  shard describing the solutions, and the code object holding them. This is
+ *  the same pairing the library's own lazy loading consumes, so any tool able
+ *  to emit that pair can produce a payload.
+ *
+ *  Registration takes effect immediately and does not restart or reinitialize
+ *  anything. On return, ``kernelIndices`` holds one index per solution in the
+ *  payload, each of which may be passed to \ref hipblasLtMatmul through the
+ *  ordinary index-based algorithm path.
+ *
+ *  Registration does **not** change what heuristic selection returns. Use
+ *  \ref hipblasLtUserKernelSetExactMatch for that. The separation is deliberate:
+ *  it lets a tuning loop execute and measure a candidate through the real
+ *  dispatch path without risking a regression for any other shape.
+ *
+ *  An index is meaningful only within the process that issued it. It is not
+ *  stable across runs and must not be recorded and replayed later.
+ *
+ *  @param[in]
+ *  handle          Pointer to the allocated hipBLASLt handle.
+ *  @param[in]
+ *  libraryPath     Path to the payload's ``.dat`` or ``.dat.zlib`` shard.
+ *  @param[in]
+ *  codeObjectPath  Path to the payload's ``.co`` code object.
+ *  @param[out]
+ *  kernelIndices   Receives the assigned indices, up to ``maxIndices``.
+ *  @param[in]
+ *  maxIndices      Capacity of ``kernelIndices``.
+ *  @param[out]
+ *  numIndices      Number of solutions registered, which may exceed
+ *                  ``maxIndices``; in that case only the first ``maxIndices``
+ *                  are written.
+ *
+ *  \retval HIPBLAS_STATUS_SUCCESS          The payload was registered.
+ *  \retval HIPBLAS_STATUS_INVALID_VALUE    A file could not be read, held no
+ *                                          solutions, or the code object could
+ *                                          not be loaded on this device.
+ */
+HIPBLASLT_EXPORT
+hipblasStatus_t hipblasLtUserKernelRegister(hipblasLtHandle_t handle,
+                                            const char*       libraryPath,
+                                            const char*       codeObjectPath,
+                                            int*              kernelIndices,
+                                            int               maxIndices,
+                                            int*              numIndices);
+
+/*! \ingroup library_module
+ *  \brief Make a registered kernel selectable for one exact problem shape.
+ *
+ *  \details
+ *  After this call, heuristic selection for exactly this shape returns the
+ *  registered kernel ahead of every shipped tier. Any other shape is unaffected,
+ *  and a near miss falls through to normal selection: matching is exact, with no
+ *  tolerance and no nearest-neighbour behaviour.
+ *
+ *  Selection results already computed for this shape are discarded, so the
+ *  mapping takes effect even for a shape the process has been running all along.
+ *
+ *  @param[in]
+ *  handle       Pointer to the allocated hipBLASLt handle.
+ *  @param[in]
+ *  kernelIndex  An index returned by \ref hipblasLtUserKernelRegister.
+ *  @param[in]
+ *  m, n, batch, k  The problem shape to map, matched exactly.
+ *
+ *  \retval HIPBLAS_STATUS_SUCCESS          The mapping was published.
+ *  \retval HIPBLAS_STATUS_INVALID_VALUE    The index is not a registered user
+ *                                          kernel.
+ */
+HIPBLASLT_EXPORT
+hipblasStatus_t hipblasLtUserKernelSetExactMatch(hipblasLtHandle_t handle,
+                                                 int               kernelIndex,
+                                                 size_t            m,
+                                                 size_t            n,
+                                                 size_t            batch,
+                                                 size_t            k);
+
+/*! \ingroup library_module
+ *  \brief Report how many kernels are registered and how many are selectable.
+ *
+ *  @param[in]
+ *  handle      Pointer to the allocated hipBLASLt handle.
+ *  @param[out]
+ *  registered  Number of registered kernels, or NULL if not wanted.
+ *  @param[out]
+ *  selectable  Number with an exact-match mapping, or NULL if not wanted.
+ *
+ *  \retval HIPBLAS_STATUS_SUCCESS  The counts were written.
+ */
+HIPBLASLT_EXPORT
+hipblasStatus_t hipblasLtUserKernelGetCounts(hipblasLtHandle_t handle,
+                                             size_t*           registered,
+                                             size_t*           selectable);
+
+/*! \ingroup library_module
+ *  \brief Whether an algorithm refers to a registered user kernel.
+ *
+ *  \details
+ *  Provenance is carried by the index range itself: shipped solutions occupy
+ *  ``[0, 2^30)`` and registered kernels ``[2^30, 2^31)``, so this answers
+ *  without consulting any library state.
+ *
+ *  @param[in]
+ *  algo        The algorithm to inspect.
+ *  @param[out]
+ *  isUserKernel  Set to a nonzero value if the algorithm is a registered kernel.
+ *
+ *  \retval HIPBLAS_STATUS_SUCCESS          The result was written.
+ *  \retval HIPBLAS_STATUS_INVALID_VALUE    A pointer argument was NULL.
+ */
+HIPBLASLT_EXPORT
+hipblasStatus_t hipblasLtMatmulAlgoIsUserKernel(const hipblasLtMatmulAlgo_t* algo,
+                                                int*                         isUserKernel);
 #ifdef __cplusplus
 }
 #endif

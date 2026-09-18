@@ -11,6 +11,7 @@ target_sources(hipblaslt
         "${CMAKE_CURRENT_SOURCE_DIR}/rocblaslt_mat.cpp"
         "${CMAKE_CURRENT_SOURCE_DIR}/status.cpp"
         "${CMAKE_CURRENT_SOURCE_DIR}/tensile_host.cpp"
+        "${CMAKE_CURRENT_SOURCE_DIR}/user_kernel_registry.cpp"
         "${CMAKE_CURRENT_SOURCE_DIR}/UserDrivenTuningParser.cpp"
         "${CMAKE_CURRENT_SOURCE_DIR}/utility.cpp"
 )
