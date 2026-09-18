@@ -40,4 +40,5 @@ NB_MODULE(_core, m)
     init_descriptors(m);
     init_matmul(m);
     init_convert(m);
+    init_user_kernel(m);
 }

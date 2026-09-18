@@ -20,11 +20,14 @@
 #include <hipblaslt/hipblaslt-ext.hpp>
 #include <hipblaslt/hipblaslt.h>
 
+#include <algorithm>
 #include <cstdint>
 #include <cstdio>
 #include <cstring>
 #include <filesystem>
+#include <fstream>
 #include <string>
+#include <utility>
 #include <vector>
 
 namespace
@@ -94,13 +97,99 @@ namespace
             p.pref, HIPBLASLT_MATMUL_PREF_MAX_WORKSPACE_BYTES, &p.maxWs, sizeof(p.maxWs));
     }
 
-    std::string payloadStem()
+    // PCI device id of the current GPU, e.g. "75a0", or empty if unreadable.
+    //
+    // Shard filenames carry the device ids they were built for. Filtering on
+    // it keeps the test from registering kernels that belong to other GPUs,
+    // which would be inert here and would inflate the counts asserted below.
+    std::string devicePciId()
+    {
+        int device = 0;
+        if(hipGetDevice(&device) != hipSuccess)
+            return {};
+
+        char bus[64] = {};
+        if(hipDeviceGetPCIBusId(bus, sizeof(bus), device) != hipSuccess)
+            return {};
+
+        std::string lower(bus);
+        std::transform(lower.begin(), lower.end(), lower.begin(), ::tolower);
+
+        std::ifstream in("/sys/bus/pci/devices/" + lower + "/device");
+        std::string   id;
+        if(!in || !(in >> id))
+            return {};
+        if(id.rfind("0x", 0) == 0)
+            id = id.substr(2);
+        return id;
+    }
+
+    // Candidate payloads in this build's installed library, biggest first.
+    //
+    // Globbed rather than named so the test follows whatever GPU this build
+    // targets. Several shards match and which is usable cannot be known
+    // without trying: one built for a different device id or CU count
+    // deserializes fine, but every kernel in it is rejected when validated
+    // against this GPU. Bigger shards come first only because they hold more
+    // kernels and are likelier to contain a fit.
+    std::vector<std::string> candidatePayloads()
     {
         const char* env = std::getenv("HIPBLASLT_USER_KERNEL_TEST_LIB_DIR");
-        std::string dir = env ? env : "hipblaslt-install/lib/hipblaslt/library/gfx950";
-        return dir
-               + "/TensileLibrary_BB_BB_HA_Bias_SAV_UA_Type_BB_HPA_Contraction_l_Alik_Bljk_Cijk"
-                 "_Dijk_ID75a0_gfx950";
+        const std::string root
+            = env ? env : "hipblaslt-install/lib/hipblaslt/library";
+
+        const std::string pciId = devicePciId();
+
+        std::vector<std::pair<uintmax_t, std::string>> found;
+        std::error_code ec;
+        if(!std::filesystem::is_directory(root, ec))
+            return {};
+
+        for(auto const& arch : std::filesystem::directory_iterator(root, ec))
+        {
+            if(!arch.is_directory())
+                continue;
+            for(auto const& entry : std::filesystem::directory_iterator(arch.path(), ec))
+            {
+                std::string name = entry.path().filename().string();
+                if(name.rfind("TensileLibrary_BB_BB_", 0) != 0)
+                    continue;
+                if(name.find("_Alik_Bljk_") == std::string::npos)
+                    continue;
+
+                // Skip shards built for other GPUs rather than registering
+                // kernels that can never run here.
+                std::string lowerName(name);
+                std::transform(lowerName.begin(), lowerName.end(), lowerName.begin(),
+                               ::tolower);
+                if(!pciId.empty() && lowerName.find(pciId) == std::string::npos)
+                    continue;
+
+                // Recover the stem: the loader appends the ".zlib" probe
+                // itself, so the bare ".dat" name is what gets passed even
+                // when only the compressed form exists.
+                std::string stem = entry.path().string();
+                for(std::string suffix : {std::string(".zlib"), std::string(".dat")})
+                    if(stem.size() > suffix.size()
+                       && stem.compare(stem.size() - suffix.size(), suffix.size(), suffix) == 0)
+                        stem.resize(stem.size() - suffix.size());
+                if(stem == entry.path().string())
+                    continue; // not a .dat/.dat.zlib
+                if(!std::filesystem::exists(stem + ".co"))
+                    continue;
+
+                found.emplace_back(entry.file_size(ec), stem);
+            }
+        }
+
+        std::sort(found.begin(), found.end(), [](auto const& a, auto const& b) {
+            return a.first > b.first;
+        });
+        std::vector<std::string> stems;
+        for(auto const& f : found)
+            if(std::find(stems.begin(), stems.end(), f.second) == stems.end())
+                stems.push_back(f.second);
+        return stems;
     }
 } // namespace
 
@@ -114,13 +203,10 @@ int main(int argc, char** argv)
     const std::string mode = argv[1];
     const std::string root = argv[2];
 
-    const std::string stem = payloadStem();
-    const std::string dat  = stem + ".dat";
-    const std::string co   = stem + ".co";
-    if(!std::filesystem::exists(co)
-       || (!std::filesystem::exists(dat) && !std::filesystem::exists(dat + ".zlib")))
+    const std::vector<std::string> candidates = candidatePayloads();
+    if(candidates.empty())
     {
-        std::printf("SKIP: payload not found at %s\n", stem.c_str());
+        std::printf("SKIP: no payload shard in this build's installed library\n");
         return 0;
     }
 
@@ -151,32 +237,42 @@ int main(int argc, char** argv)
         CHECK_BLAS(topIndex(&shippedTop));
         std::printf("[write] shipped top index: %d\n", shippedTop);
 
-        std::vector<int> indices(4096);
-        int              numIndices = 0;
-        CHECK_BLAS(hipblasLtUserKernelRegister(
-            handle, dat.c_str(), co.c_str(), indices.data(), (int)indices.size(), &numIndices));
-        EXPECT(numIndices > 0, "payload registered");
-        indices.resize(numIndices < (int)indices.size() ? numIndices : indices.size());
-
-        // Pick one that can actually serve the shape, as a tuning loop would.
+        // Walk candidates until one yields a kernel that serves the shape, as
+        // a tuning loop would. A shard for another device id registers fine
+        // but all its kernels are rejected when validated against this GPU.
         int chosen = -1;
-        for(int idx : indices)
+        for(auto const& stem : candidates)
         {
-            std::vector<int>                              one{idx};
-            std::vector<hipblasLtMatmulHeuristicResult_t> got;
-            if(hipblaslt_ext::getAlgosFromIndex(handle, one, got) != HIPBLAS_STATUS_SUCCESS
-               || got.empty())
-                continue;
-            size_t ws    = 0;
-            float  alpha = 1.0f, beta = 0.0f;
-            if(hipblaslt_ext::matmulIsAlgoSupported(
-                   handle, p.desc, &alpha, p.la, p.lb, &beta, p.lc, p.ld, got[0].algo, ws)
-                   == HIPBLAS_STATUS_SUCCESS
-               && ws <= p.maxWs)
+            const std::string dat = stem + ".dat", co = stem + ".co";
+
+            std::vector<int> indices(4096);
+            int              numIndices = 0;
+            CHECK_BLAS(hipblasLtUserKernelRegister(
+                handle, dat.c_str(), co.c_str(), indices.data(), (int)indices.size(),
+                &numIndices));
+            EXPECT(numIndices > 0, "payload registered");
+            indices.resize(numIndices < (int)indices.size() ? numIndices : indices.size());
+
+            for(int idx : indices)
             {
-                chosen = idx;
-                break;
+                std::vector<int>                              one{idx};
+                std::vector<hipblasLtMatmulHeuristicResult_t> got;
+                if(hipblaslt_ext::getAlgosFromIndex(handle, one, got) != HIPBLAS_STATUS_SUCCESS
+                   || got.empty())
+                    continue;
+                size_t ws    = 0;
+                float  alpha = 1.0f, beta = 0.0f;
+                if(hipblaslt_ext::matmulIsAlgoSupported(
+                       handle, p.desc, &alpha, p.la, p.lb, &beta, p.lc, p.ld, got[0].algo, ws)
+                       == HIPBLAS_STATUS_SUCCESS
+                   && ws <= p.maxWs)
+                {
+                    chosen = idx;
+                    break;
+                }
             }
+            if(chosen >= 0)
+                break;
         }
         EXPECT(chosen >= 0, "found a registered kernel that serves the shape");
 

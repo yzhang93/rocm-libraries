@@ -35,6 +35,7 @@ nanobind_add_module(_core NB_SUPPRESS_WARNINGS
     "${CMAKE_CURRENT_SOURCE_DIR}/src/device_array.cpp"
     "${CMAKE_CURRENT_SOURCE_DIR}/src/descriptors.cpp"
     "${CMAKE_CURRENT_SOURCE_DIR}/src/matmul.cpp"
+    "${CMAKE_CURRENT_SOURCE_DIR}/src/user_kernel.cpp"
     "${CMAKE_CURRENT_SOURCE_DIR}/src/convert.hip"
 )
 target_include_directories(_core PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/src")
@@ -47,6 +48,27 @@ target_link_libraries(_core PRIVATE hip::host roc::hipblaslt)
 # entry points silently disagree with the library actually loaded at runtime.
 # Re-add hipBLASLt's own include dirs as non-system -I so they are searched
 # first, since -I precedes -isystem in the header search order.
+# Keep the runtime resolution pointed at the same hipBLASLt this was built
+# against. CMake strips the build rpath on install, so without this the
+# extension in site-packages resolves libhipblaslt.so.1 through the default
+# search path and silently loads whatever ROCm has installed -- which fails on
+# any entry point newer than that copy, and would otherwise run against a
+# different library version than it was compiled for. This is the runtime
+# counterpart to forcing the include order below.
+get_target_property(hipblaslt_lib_release roc::hipblaslt IMPORTED_LOCATION_RELEASE)
+get_target_property(hipblaslt_lib_plain roc::hipblaslt IMPORTED_LOCATION)
+set(hipblaslt_lib "${hipblaslt_lib_release}")
+if(NOT hipblaslt_lib)
+    set(hipblaslt_lib "${hipblaslt_lib_plain}")
+endif()
+if(hipblaslt_lib)
+    get_filename_component(hipblaslt_libdir "${hipblaslt_lib}" DIRECTORY)
+    set_target_properties(_core PROPERTIES
+        INSTALL_RPATH "${hipblaslt_libdir}"
+        BUILD_WITH_INSTALL_RPATH TRUE)
+    message(STATUS "hipblaslt python: embedding rpath ${hipblaslt_libdir}")
+endif()
+
 get_target_property(hipblaslt_interface_includes
     roc::hipblaslt INTERFACE_INCLUDE_DIRECTORIES)
 if(hipblaslt_interface_includes)

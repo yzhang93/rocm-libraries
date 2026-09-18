@@ -31,7 +31,9 @@
 #include <cstdio>
 #include <cstring>
 #include <filesystem>
+#include <fstream>
 #include <string>
+#include <utility>
 #include <vector>
 
 namespace
@@ -86,39 +88,108 @@ namespace
         return index;
     }
 
-    std::string findPayloadStem()
+    // PCI device id of the current GPU, e.g. "75a0", or empty if unreadable.
+    //
+    // Shard filenames carry the device ids they were built for. Filtering on
+    // it keeps the test from registering kernels that belong to other GPUs,
+    // which would be inert here and would inflate the counts asserted below.
+    std::string devicePciId()
     {
-        // The installed library directory, relative to the build tree this test
-        // is compiled in. Overridable so it can run against another install.
-        const char* env = std::getenv("HIPBLASLT_USER_KERNEL_TEST_LIB_DIR");
-        std::string dir = env ? env
-                              : "hipblaslt-install/lib/hipblaslt/library/gfx950";
+        int device = 0;
+        if(hipGetDevice(&device) != hipSuccess)
+            return {};
 
-        // A bf16 in/out, high-precision-accumulate, TN shard for this device,
-        // matching the problem type the test below builds.
-        const std::string stem = dir
-            + "/TensileLibrary_BB_BB_HA_Bias_SAV_UA_Type_BB_HPA_Contraction_l_Alik_Bljk_Cijk_Dijk"
-              "_ID75a0_gfx950";
-        return stem;
+        char bus[64] = {};
+        if(hipDeviceGetPCIBusId(bus, sizeof(bus), device) != hipSuccess)
+            return {};
+
+        std::string lower(bus);
+        std::transform(lower.begin(), lower.end(), lower.begin(), ::tolower);
+
+        std::ifstream in("/sys/bus/pci/devices/" + lower + "/device");
+        std::string   id;
+        if(!in || !(in >> id))
+            return {};
+        if(id.rfind("0x", 0) == 0)
+            id = id.substr(2);
+        return id;
+    }
+
+    // Candidate payloads in this build's installed library, biggest first.
+    //
+    // Globbed rather than named so the test follows whatever GPU this build
+    // targets. Several shards match and which is usable cannot be known
+    // without trying: one built for a different device id or CU count
+    // deserializes fine, but every kernel in it is rejected when validated
+    // against this GPU. Bigger shards come first only because they hold more
+    // kernels and are likelier to contain a fit.
+    std::vector<std::string> candidatePayloads()
+    {
+        const char* env = std::getenv("HIPBLASLT_USER_KERNEL_TEST_LIB_DIR");
+        const std::string root
+            = env ? env : "hipblaslt-install/lib/hipblaslt/library";
+
+        const std::string pciId = devicePciId();
+
+        std::vector<std::pair<uintmax_t, std::string>> found;
+        std::error_code ec;
+        if(!std::filesystem::is_directory(root, ec))
+            return {};
+
+        for(auto const& arch : std::filesystem::directory_iterator(root, ec))
+        {
+            if(!arch.is_directory())
+                continue;
+            for(auto const& entry : std::filesystem::directory_iterator(arch.path(), ec))
+            {
+                std::string name = entry.path().filename().string();
+                if(name.rfind("TensileLibrary_BB_BB_", 0) != 0)
+                    continue;
+                if(name.find("_Alik_Bljk_") == std::string::npos)
+                    continue;
+
+                // Skip shards built for other GPUs rather than registering
+                // kernels that can never run here.
+                std::string lowerName(name);
+                std::transform(lowerName.begin(), lowerName.end(), lowerName.begin(),
+                               ::tolower);
+                if(!pciId.empty() && lowerName.find(pciId) == std::string::npos)
+                    continue;
+
+                // Recover the stem: the loader appends the ".zlib" probe
+                // itself, so the bare ".dat" name is what gets passed even
+                // when only the compressed form exists.
+                std::string stem = entry.path().string();
+                for(std::string suffix : {std::string(".zlib"), std::string(".dat")})
+                    if(stem.size() > suffix.size()
+                       && stem.compare(stem.size() - suffix.size(), suffix.size(), suffix) == 0)
+                        stem.resize(stem.size() - suffix.size());
+                if(stem == entry.path().string())
+                    continue; // not a .dat/.dat.zlib
+                if(!std::filesystem::exists(stem + ".co"))
+                    continue;
+
+                found.emplace_back(entry.file_size(ec), stem);
+            }
+        }
+
+        std::sort(found.begin(), found.end(), [](auto const& a, auto const& b) {
+            return a.first > b.first;
+        });
+        std::vector<std::string> stems;
+        for(auto const& f : found)
+            if(std::find(stems.begin(), stems.end(), f.second) == stems.end())
+                stems.push_back(f.second);
+        return stems;
     }
 } // namespace
 
 int main()
 {
-    const std::string stem = findPayloadStem();
-    const std::string dat  = stem + ".dat";
-    const std::string co   = stem + ".co";
-
-    // LoadLibraryFile resolves the .zlib variant itself, so the bare .dat name
-    // is what gets passed even though only the compressed file is on disk.
-    if(!std::filesystem::exists(dat) && !std::filesystem::exists(dat + ".zlib"))
+    const std::vector<std::string> candidates = candidatePayloads();
+    if(candidates.empty())
     {
-        std::printf("SKIP: payload shard not found at %s(.zlib)\n", dat.c_str());
-        return 0;
-    }
-    if(!std::filesystem::exists(co))
-    {
-        std::printf("SKIP: payload code object not found at %s\n", co.c_str());
+        std::printf("SKIP: no payload shard in this build's installed library\n");
         return 0;
     }
 
@@ -189,57 +260,73 @@ int main()
     EXPECT(registered == 0 && selectable == 0, "nothing registered or selectable at start");
 
     // ---- 2. register ------------------------------------------------------
-    std::vector<int> indices(4096);
-    int              numIndices = 0;
-    CHECK_BLAS(hipblasLtUserKernelRegister(
-        handle, dat.c_str(), co.c_str(), indices.data(), (int)indices.size(), &numIndices));
-    std::printf("registered %d kernels from the payload\n", numIndices);
-    EXPECT(numIndices > 0, "the payload produced at least one kernel");
-    indices.resize(std::min<size_t>(numIndices, indices.size()));
-
-    bool allInUserRange = true;
-    for(int idx : indices)
-        if(idx < (1 << 30))
-            allInUserRange = false;
-    EXPECT(allInUserRange, "every assigned index is in the user range [2^30, 2^31)");
-
-    CHECK_BLAS(hipblasLtUserKernelGetCounts(handle, &registered, &selectable));
-    EXPECT(registered == (size_t)numIndices, "registered count matches");
-    EXPECT(selectable == 0, "registering alone makes nothing selectable");
-
-    // ---- 3. registering must not change selection -------------------------
-    int afterRegisterTop = -1;
-    CHECK_BLAS(heuristicTop(&afterRegisterTop));
-    EXPECT(afterRegisterTop == shippedTop,
-           "selection is unchanged by registration (register != select)");
-
-    // ---- 4. a registered kernel is executable by index right away ---------
-    // Find one that can serve this problem, which is what a tuning loop does
-    // before it commits to a candidate.
-    int    chosen   = -1;
-    size_t chosenWs = 0;
+    // Walk candidates until one yields a kernel that serves this problem. A
+    // shard built for another device id or CU count registers fine but every
+    // kernel in it is rejected when validated against this GPU, so which
+    // payload is usable cannot be known without trying.
+    int                              chosen   = -1;
+    size_t                           chosenWs = 0;
     hipblasLtMatmulHeuristicResult_t chosenResult{};
-    for(int idx : indices)
+    size_t                           totalRegistered = 0;
+
+    for(auto const& stem : candidates)
     {
-        std::vector<int>                              one{idx};
-        std::vector<hipblasLtMatmulHeuristicResult_t> got;
-        if(hipblaslt_ext::getAlgosFromIndex(handle, one, got) != HIPBLAS_STATUS_SUCCESS
-           || got.empty())
-            continue;
+        const std::string dat = stem + ".dat", co = stem + ".co";
 
-        size_t ws    = 0;
-        float  alpha = 1.0f, beta = 0.0f;
-        if(hipblaslt_ext::matmulIsAlgoSupported(
-               handle, desc, &alpha, la, lb, &beta, lc, ld, got[0].algo, ws)
-           != HIPBLAS_STATUS_SUCCESS)
-            continue;
-        if(ws > maxWs)
-            continue;
+        std::vector<int> indices(4096);
+        int              numIndices = 0;
+        CHECK_BLAS(hipblasLtUserKernelRegister(
+            handle, dat.c_str(), co.c_str(), indices.data(), (int)indices.size(), &numIndices));
+        EXPECT(numIndices > 0, "the payload produced at least one kernel");
+        indices.resize(std::min<size_t>(numIndices, indices.size()));
+        totalRegistered += (size_t)numIndices;
 
-        chosen       = idx;
-        chosenWs     = ws;
-        chosenResult = got[0];
-        break;
+        bool allInUserRange = true;
+        for(int idx : indices)
+            if(idx < (1 << 30))
+                allInUserRange = false;
+        EXPECT(allInUserRange, "every assigned index is in the user range [2^30, 2^31)");
+
+        CHECK_BLAS(hipblasLtUserKernelGetCounts(handle, &registered, &selectable));
+        EXPECT(registered == totalRegistered, "registered count matches");
+        EXPECT(selectable == 0, "registering alone makes nothing selectable");
+
+        // ---- 3. registering must not change selection ---------------------
+        int afterRegisterTop = -1;
+        CHECK_BLAS(heuristicTop(&afterRegisterTop));
+        EXPECT(afterRegisterTop == shippedTop,
+               "selection is unchanged by registration (register != select)");
+
+        // ---- 4. a registered kernel is executable by index right away -----
+        // Finding one is what a tuning loop does before committing.
+        for(int idx : indices)
+        {
+            std::vector<int>                              one{idx};
+            std::vector<hipblasLtMatmulHeuristicResult_t> got;
+            if(hipblaslt_ext::getAlgosFromIndex(handle, one, got) != HIPBLAS_STATUS_SUCCESS
+               || got.empty())
+                continue;
+
+            size_t ws    = 0;
+            float  alpha = 1.0f, beta = 0.0f;
+            if(hipblaslt_ext::matmulIsAlgoSupported(
+                   handle, desc, &alpha, la, lb, &beta, lc, ld, got[0].algo, ws)
+               != HIPBLAS_STATUS_SUCCESS)
+                continue;
+            if(ws > maxWs)
+                continue;
+
+            chosen       = idx;
+            chosenWs     = ws;
+            chosenResult = got[0];
+            break;
+        }
+        if(chosen >= 0)
+        {
+            std::printf("registered %d kernels from %s\n",
+                        numIndices, std::filesystem::path(stem).filename().string().c_str());
+            break;
+        }
     }
     EXPECT(chosen >= 0, "a registered kernel resolves by index and supports the problem");
 
