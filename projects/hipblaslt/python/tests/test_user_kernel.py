@@ -8,6 +8,8 @@ tier and interfere with one another depending on collection order, which is the
 sort of flake that only shows up under -p no:randomly.
 """
 import os
+import subprocess
+import sys
 from pathlib import Path
 
 import numpy as np
@@ -232,3 +234,106 @@ def test_refresh_without_open_library_fails():
     with c.Handle() as h:
         with pytest.raises(c.HipblasLtError):
             c.user_kernel_refresh(h)
+
+
+# The glob for a payload of a *different* data type than the problem below.
+# Same TN layout, fp16 instead of bf16, so only the problem-type check can
+# tell them apart.
+_OTHER_TYPE_GLOB = "TensileLibrary_HH_HH_*_Alik_Bljk_*.dat*"
+
+
+def _payloads_matching(glob):
+    pci_id = _device_pci_id()
+    found = []
+    for parent in Path(__file__).resolve().parents:
+        library = parent / _LIBRARY_RELATIVE
+        if not library.is_dir():
+            continue
+        for arch_dir in sorted(library.iterdir()):
+            if not arch_dir.is_dir():
+                continue
+            for shard in arch_dir.glob(glob):
+                if pci_id and pci_id not in shard.name.lower():
+                    continue
+                stem = str(shard)
+                for suffix in (".zlib", ".dat"):
+                    if stem.endswith(suffix):
+                        stem = stem[: -len(suffix)]
+                if Path(stem + ".co").exists():
+                    found.append((shard.stat().st_size, stem))
+        if found:
+            break
+    return [(s + ".dat", s + ".co") for _, s in sorted(found, reverse=True)]
+
+
+@requires_gpu
+def test_wrong_problem_type_is_never_selected():
+    """Invariant 7.1: mapping a kernel of the wrong type must not change anything.
+
+    An fp16 kernel is mapped to a bf16 shape, which SetExactMatch accepts
+    because it binds an index to a shape and validates nothing. Selection must
+    still refuse it and return the shipped kernel unchanged.
+
+    This covers the observable invariant, not any one mechanism. Two things
+    reject the kernel independently: the tier compares the full problem type,
+    and the solution's own predicates reject it as well. Measured by disabling
+    the type comparison, the predicates alone still refuse all 753 fp16 kernels
+    for this problem, so the comparison is defence in depth here rather than
+    the only thing standing between a wrong-type kernel and a launch.
+    """
+    payloads = _payloads_matching(_OTHER_TYPE_GLOB)
+    if not payloads:
+        pytest.skip("no payload of a different data type in this build")
+
+    # A shape of its own, so this test cannot disturb the mappings other tests
+    # in this process rely on.
+    m = 64
+    with c.Handle() as h:
+        desc, _, lay, pref = _problem(h, m=m)
+        shipped = _top(h, desc, lay, pref)
+        assert not c.is_user_kernel(shipped.algo)
+
+        dat, co = payloads[0]
+        indices = c.user_kernel_register(h, dat, co)
+        assert indices, "fp16 payload produced no kernels"
+
+        # SetExactMatch does not type-check; it binds an index to a shape.
+        c.user_kernel_set_exact_match(h, indices[0], m, N, 1, K)
+
+        after = _top(h, desc, lay, pref)
+        assert not c.is_user_kernel(after.algo), \
+            "an fp16 kernel was selected for a bf16 problem"
+        assert after.algo.solution_index == shipped.algo.solution_index, \
+            "selection changed even though the mapped kernel cannot serve the problem"
+
+
+@requires_gpu
+def test_prediction_mode_still_consults_the_user_tier():
+    """Prediction mode must not discard the user tier.
+
+    findTopSolutions skips rows whose type() is "EqualityMatching" when the
+    prediction library is active, and the user predicate reports exactly that
+    string because Property_CRTP::type() is final and cannot be overridden. The
+    tier survives only because the skip excludes it by dynamic_cast instead.
+    Without that, a registered kernel is silently ignored whenever prediction
+    mode is on.
+
+    Runs as a subprocess because the flag is read once, when the Tensile Debug
+    singleton is constructed.
+    """
+    demo = Path(__file__).resolve().parents[1] / "examples" / "user_kernel_demo.py"
+    if not demo.exists():
+        pytest.skip(f"demo not found at {demo}")
+
+    env = dict(os.environ, TENSILE_PREDICTION_LIB="1")
+    proc = subprocess.run([sys.executable, str(demo)],
+                          env=env, capture_output=True, text=True, timeout=600)
+
+    if "SKIP:" in proc.stdout or "no sample payload" in proc.stdout:
+        pytest.skip("demo found no usable payload")
+
+    assert proc.returncode == 0, (
+        "the demo fails under TENSILE_PREDICTION_LIB=1, so the user tier is "
+        f"being skipped in prediction mode:\n{proc.stdout}\n{proc.stderr}")
+    assert "(user)" in proc.stdout, \
+        f"no user kernel was selected under prediction mode:\n{proc.stdout}"

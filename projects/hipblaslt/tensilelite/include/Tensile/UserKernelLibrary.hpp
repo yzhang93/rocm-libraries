@@ -401,10 +401,16 @@ namespace TensileLite
          * batch, K].
          *
          * The predicate triple afterwards is the same validation
-         * MasterSolutionLibrary applies to a hand-picked TENSILE_SOLUTION_INDEX.
-         * The warning printed there -- that it "will only work for a particular
-         * transpose and data type" -- is precisely why the type check above it
-         * is needed and cannot be replaced by the predicates.
+         * MasterSolutionLibrary applies to a hand-picked TENSILE_SOLUTION_INDEX,
+         * whose accompanying warning says it "will only work for a particular
+         * transpose and data type".
+         *
+         * In practice the two overlap: disabling the type comparison above and
+         * offering 753 fp16 kernels to a bf16 problem saw the predicates reject
+         * every one. The comparison is kept because nothing in the contract
+         * promises they always will, and because it states the requirement
+         * where a reader will look for it, but it is defence in depth rather
+         * than the sole barrier.
          */
         static bool canServe(MySolution const& solution,
                              MyProblem const&  problem,
