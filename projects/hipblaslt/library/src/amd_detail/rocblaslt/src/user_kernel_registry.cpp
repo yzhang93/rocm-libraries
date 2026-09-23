@@ -252,7 +252,12 @@ namespace rocblaslt
                 return false;
             }
 
-            const bool rootExisted = fs::exists(root);
+            // Recorded before the call that may create them: each level is
+            // tightened only if this code is what made it, so a caller who
+            // pre-creates a locked-down root still gets a usable objects dir
+            // rather than one left at the ambient umask.
+            const bool rootExisted    = fs::exists(root);
+            const bool objectsExisted = fs::exists(root / kObjectsDir);
 
             fs::create_directories(root / kObjectsDir, ec);
             if(ec && !fs::is_directory(root / kObjectsDir))
@@ -263,10 +268,9 @@ namespace rocblaslt
             }
 
             if(!rootExisted)
-            {
                 tightenWritePermissions(root);
+            if(!objectsExisted)
                 tightenWritePermissions(root / kObjectsDir);
-            }
 
             // Whoever can write here chooses which code object this process
             // loads, so the permissions are part of the trust boundary. Both

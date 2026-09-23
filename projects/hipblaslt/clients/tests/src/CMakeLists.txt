@@ -19,6 +19,8 @@ target_sources(hipblaslt-test
         ${CMAKE_CURRENT_SOURCE_DIR}/synchronizer_size_check_test.cpp
         ${CMAKE_CURRENT_SOURCE_DIR}/row_uniformity_gtest.cpp
         ${CMAKE_CURRENT_SOURCE_DIR}/ulp_gtest.cpp
+        ${CMAKE_CURRENT_SOURCE_DIR}/user_kernel_register_test.cpp
+        ${CMAKE_CURRENT_SOURCE_DIR}/user_kernel_persist_test.cpp
 )
 
 # NOTE: secure_env_gtest.cpp (ROCM-26729) intentionally includes the header-only
@@ -26,3 +28,9 @@ target_sources(hipblaslt-test
 # directory. Adding the internal rocblaslt/src/include dir to hipblaslt-test
 # shadows the clients' own "utility.hpp" with the library's internal one and
 # breaks the build of unrelated test sources, so it must not be added here.
+#
+# NOTE: the two user_kernel_* tests share user_kernel_test_common.hpp, included
+# by relative path for the same reason. Their real bodies are DISABLED_ cases
+# that the visible cases re-run this binary to reach, because the user kernel
+# tier is process-global: they assert it starts empty, and they register
+# thousands of kernels that would otherwise leak into later tests.
