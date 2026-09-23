@@ -57,6 +57,8 @@ class BasePostProcessor(BaseParamBuilder):
         # the parameters the fused epilogue pins.
         if self.config.get("RMS_EPILOGUE", False):
             fork_params, mi_groups = self._apply_rms_epilogue(fork_params, mi_groups)
+        elif self.config.get("SUBTILE", False):
+            fork_params, mi_groups = self._apply_subtile(fork_params, mi_groups)
         elif self.config.get("MX", False):
             fork_params, mi_groups = self._apply_mx_gemm(fork_params, mi_groups)
         return fork_params, mi_groups
@@ -112,12 +114,34 @@ class BasePostProcessor(BaseParamBuilder):
     ) -> Tuple[Dict[str, ForkParameter], GroupDimension]:
         """Restrict the search space to RMSEpilogue-legal kernels.
 
-        The fused RMSNorm epilogue only exists on the Subtile code path, whose
-        emitters read and write AGPRs directly (hence MIArchVgpr=False) and
-        which Tensile rejects together with PrefetchAcrossPersistent and the
-        custom main-loop schedule. Kernels violating any of these are rejected
-        during codegen, so pinning them here keeps the search space useful
-        instead of mostly-invalid.
+        The fused RMSNorm epilogue rides on the Subtile code path, so this is
+        the Subtile search space plus the epilogue's own parameters.
+        """
+        return self._apply_subtile(
+            fork_params,
+            mi_groups,
+            {
+                "RMSEpilogue": [True],
+                "RMSEpilogueGammaType": [self.config.get("RMS_EPILOGUE_GAMMA_TYPE", "b")],
+                "RMSEpilogueResidualType": [
+                    self.config.get("RMS_EPILOGUE_RESIDUAL_TYPE", "b")
+                ],
+            },
+        )
+
+    def _apply_subtile(
+        self,
+        fork_params: Dict[str, ForkParameter],
+        mi_groups: GroupDimension,
+        extra_overrides: Dict[str, List] | None = None,
+    ) -> Tuple[Dict[str, ForkParameter], GroupDimension]:
+        """Restrict the search space to Subtile-legal kernels.
+
+        The Subtile emitters read and write AGPRs directly (hence
+        MIArchVgpr=False) and Tensile rejects them together with
+        PrefetchAcrossPersistent and the custom main-loop schedule. Kernels
+        violating any of these are rejected during codegen, so pinning them
+        here keeps the search space useful instead of mostly-invalid.
 
         StreamK is pinned to data-parallel-only because anything else makes
         Tensile emit a second, GSU-reducing store pass alongside the main one.
@@ -130,9 +154,6 @@ class BasePostProcessor(BaseParamBuilder):
         accumulators, which again exhausts that list mid-kernel.
         """
         overrides: Dict[str, List] = {
-            "RMSEpilogue": [True],
-            "RMSEpilogueGammaType": [self.config.get("RMS_EPILOGUE_GAMMA_TYPE", "b")],
-            "RMSEpilogueResidualType": [self.config.get("RMS_EPILOGUE_RESIDUAL_TYPE", "b")],
             "UseSubtileImpl": [True],
             "MIArchVgpr": [False],
             "PrefetchAcrossPersistent": [0],
@@ -143,6 +164,7 @@ class BasePostProcessor(BaseParamBuilder):
             "StoreVectorWidth": [-1],
             "NumElementsPerBatchStore": [0],
         }
+        overrides.update(extra_overrides or {})
 
         # Subtile supports PrefetchGlobalRead 0/1/2 only.
         pgr = fork_params.get("PrefetchGlobalRead")
@@ -168,7 +190,7 @@ class BasePostProcessor(BaseParamBuilder):
             for name in overrides:
                 entry.pop(name, None)
 
-        mi_groups = [entry for entry in mi_groups if _mi_supports_rms_epilogue(entry)]
+        mi_groups = [entry for entry in mi_groups if _mi_supports_subtile(entry)]
 
         inst_ks = [
             MFMA.from_list(entry["MatrixInstruction"].values).K
@@ -220,7 +242,7 @@ class BasePostProcessor(BaseParamBuilder):
         for entry in mi_groups:
             for name in overrides:
                 entry.pop(name, None)
-        mi_groups = [entry for entry in mi_groups if _mi_supports_rms_epilogue(entry)]
+        mi_groups = [entry for entry in mi_groups if _mi_supports_subtile(entry)]
 
         inst_ks = [
             MFMA.from_list(entry["MatrixInstruction"].values).K
@@ -256,12 +278,11 @@ _MAX_ACCVGPRS_PER_THREAD = 256
 _WAVEFRONT_SIZE = 64
 
 
-def _mi_supports_rms_epilogue(entry: Dict[str, ForkParameter]) -> bool:
-    """Whether an MI group entry can host the fused RMSNorm epilogue.
+def _mi_supports_subtile(entry: Dict[str, ForkParameter]) -> bool:
+    """Whether an MI group entry can run on the Subtile code path.
 
-    MegaFusedEmit needs a 16x16 matrix instruction (a Subtile requirement),
-    both macro-tile dimensions 64-aligned (each workgroup reduces its own
-    slice of the reduced axis), and a D tile that fits in the AGPR file.
+    Subtile needs a 16x16 matrix instruction, both macro-tile dimensions
+    64-aligned, and a D tile that fits in the AGPR file.
     """
     gsu = entry.get("GlobalSplitU")
     if gsu is not None and gsu.values != [1]:

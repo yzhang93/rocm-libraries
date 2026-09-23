@@ -328,6 +328,7 @@ REQUIRED_CONFIG_FIELDS = ["TRANSA", "TRANSB", "DataType", "DestDataType", "Compu
 _CONFIG_OPTIONAL_COMMON = {
     "MX": False,
     "RMS_EPILOGUE": False,
+    "SUBTILE": False,
     "RMS_EPILOGUE_GAMMA_TYPE": "b",
     "RMS_EPILOGUE_RESIDUAL_TYPE": "b",
     "StreamK": True,
