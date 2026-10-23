@@ -702,6 +702,15 @@ namespace
                    hipblasLtMatmulMatrixScale_t   mode,
                    const std::vector<GroupShape>& shapes)
         {
+            runMX(elemType, elemType, outType, mode, shapes);
+        }
+
+        void runMX(hipDataType                    typeA,
+                   hipDataType                    typeB,
+                   hipDataType                    outType,
+                   hipblasLtMatmulMatrixScale_t   mode,
+                   const std::vector<GroupShape>& shapes)
+        {
             const bool      preSwizzled = mode == HIPBLASLT_MATMUL_MATRIX_SCALE_BLK32_UE8M0_32_8_EXT;
             const MXPadding pad         = mxPadding();
             if(preSwizzled && pad.freeMultiple != 32)
@@ -717,14 +726,14 @@ namespace
             }
 
             MXOperand A, B;
-            A.init(k, m, elemType, pad, preSwizzled, rng);
-            B.init(k, n, elemType, pad, preSwizzled, rng);
+            A.init(k, m, typeA, pad, preSwizzled, rng);
+            B.init(k, n, typeB, pad, preSwizzled, rng);
             GroupedMatrix C, D;
             C.init(m, n, false, outType, rng);
             D.init(m, n, false, outType, rng);
 
-            auto layA = makeLayout(elemType, groups, &k, &m, &k, HIPBLASLT_INTEGER_WIDTH_32);
-            auto layB = makeLayout(elemType, groups, &k, &n, &k, HIPBLASLT_INTEGER_WIDTH_32);
+            auto layA = makeLayout(typeA, groups, &k, &m, &k, HIPBLASLT_INTEGER_WIDTH_32);
+            auto layB = makeLayout(typeB, groups, &k, &n, &k, HIPBLASLT_INTEGER_WIDTH_32);
             auto layC = makeLayout(outType, groups, &m, &n, &C.ld, HIPBLASLT_INTEGER_WIDTH_32);
             auto layD = makeLayout(outType, groups, &m, &n, &D.ld, HIPBLASLT_INTEGER_WIDTH_32);
 
@@ -977,6 +986,25 @@ namespace
     {
         runMX(HIP_R_4F_E2M1,
               HIP_R_16F,
+              HIPBLASLT_MATMUL_MATRIX_SCALE_BLK32_UE8M0_32_8_EXT,
+              kMXShapes);
+    }
+
+    // Mixed MXFP4 A x MXFP8 B (MoE: MXFP4 expert weights, MXFP8 tokens), and the reverse.
+    TEST_F(GroupedMatmul, smoke_MXFP4xMXFP8TNPreSwizzled)
+    {
+        runMX(HIP_R_4F_E2M1,
+              HIP_R_8F_E4M3,
+              HIP_R_16BF,
+              HIPBLASLT_MATMUL_MATRIX_SCALE_BLK32_UE8M0_32_8_EXT,
+              kMXShapes);
+    }
+
+    TEST_F(GroupedMatmul, smoke_MXFP8xMXFP4TNPreSwizzled)
+    {
+        runMX(HIP_R_8F_E4M3,
+              HIP_R_4F_E2M1,
+              HIP_R_16BF,
               HIPBLASLT_MATMUL_MATRIX_SCALE_BLK32_UE8M0_32_8_EXT,
               kMXShapes);
     }
