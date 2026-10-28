@@ -2203,10 +2203,6 @@ namespace TensileLite
                   auto dataInitMode  = m_vdata[dataTensorEnum].init;
                   auto scaleInitMode = m_vdata[scaleTensorEnum].init;
 
-                  std::memset(pristineScale.cpuInput.valid.get(),
-                              0x00,
-                              scaleDesc.totalAllocatedBytes());
-
                   hipDataType const hipDataT = hipMxDataTypeForDataGenerator(dataDesc.dataType());
                   hipDataType const hipScaleT = hipMxScaleTypeForDataGenerator(scaleEltType);
 
@@ -2228,36 +2224,50 @@ namespace TensileLite
                   size_t const compactFree   = dataDesc.sizes()[freeIdx];
                   size_t const scaleElemSize = DataTypeInfo::Get(scaleDesc.dataType()).elementSize;
                   bool const   kFast         = (boundIdx == 0);
-                  for(size_t b = 0; b < batchCount; b++)
+                  // With unchanged descriptors (a later solution needing a different
+                  // swizzle), the data and canonical scale are already in cpuInput.valid.
+                  if(!descriptorsUnchanged)
                   {
-                      auto* dataPtr = static_cast<uint8_t*>(pristineData.cpuInput.valid.get())
-                                      + b * dataBatchStrideBytes;
-                      auto* scalePtr = static_cast<uint8_t*>(pristineScale.cpuInput.valid.get())
-                                       + b * scaleBatchStrideBytes;
-                      generateMXInput(hipDataT,
-                                      hipScaleT,
-                                      dataPtr,
-                                      scalePtr,
-                                      rows,
-                                      cols,
-                                      stride,
-                                      transposed,
-                                      isMatrixA ? mxBlock : 1,
-                                      isMatrixA ? 1 : mxBlock,
-                                      isMatrixA,
-                                      MXScaleLayout::None,
-                                      initModeToMXMethod(dataInitMode),
-                                      -1.0f,
-                                      1.0f,
-                                      initModeToMXMethod(scaleInitMode));
-                      if(kFast)
-                          restrideMXScaleBufferKFast(
-                              scalePtr, compactFree, compactKBlocks, paddedKBlocks, scaleElemSize);
+                      std::memset(pristineScale.cpuInput.valid.get(),
+                                  0x00,
+                                  scaleDesc.totalAllocatedBytes());
+                      for(size_t b = 0; b < batchCount; b++)
+                      {
+                          auto* dataPtr = static_cast<uint8_t*>(pristineData.cpuInput.valid.get())
+                                          + b * dataBatchStrideBytes;
+                          auto* scalePtr
+                              = static_cast<uint8_t*>(pristineScale.cpuInput.valid.get())
+                                + b * scaleBatchStrideBytes;
+                          generateMXInput(hipDataT,
+                                          hipScaleT,
+                                          dataPtr,
+                                          scalePtr,
+                                          rows,
+                                          cols,
+                                          stride,
+                                          transposed,
+                                          isMatrixA ? mxBlock : 1,
+                                          isMatrixA ? 1 : mxBlock,
+                                          isMatrixA,
+                                          MXScaleLayout::None,
+                                          initModeToMXMethod(dataInitMode),
+                                          -1.0f,
+                                          1.0f,
+                                          initModeToMXMethod(scaleInitMode));
+                          if(kFast)
+                              restrideMXScaleBufferKFast(scalePtr,
+                                                         compactFree,
+                                                         compactKBlocks,
+                                                         paddedKBlocks,
+                                                         scaleElemSize);
+                      }
                   }
 
-                  // When the kernel needs a swizzled scale, regenerate it with the
-                  // requested layout straight into gpuInput.valid; the cpuInput.valid
-                  // copy stays canonical for the CPU reference.
+                  // When the kernel needs a swizzled scale, build it in gpuInput.valid
+                  // from the canonical scale with the permutation generateMXInput
+                  // applies (generation is deterministic, so this matches regenerating
+                  // with the layout); the cpuInput.valid copy stays canonical for the
+                  // CPU reference.
                   if(swizzleLayout != MXScaleLayout::None && pristineScale.gpuInput.valid)
                   {
                       size_t const eltSize
@@ -2296,27 +2306,37 @@ namespace TensileLite
                       }
                       size_t const gpuScaleBytes = swizzledScaleElems * eltSize;
                       std::vector<uint8_t> gpuScaleBuf(gpuScaleBytes, 0);
+                      // Same scale shape as generateMXInput's swizzle: K blocks along
+                      // the data's dim 0, cols along dim 1.
+                      size_t const swizzleFast  = (static_cast<size_t>(rows) + mxBlock - 1) / mxBlock;
+                      size_t const swizzleSlow  = static_cast<size_t>(cols);
+                      size_t const compactBytes = compactKBlocks * compactFree * scaleElemSize;
+#pragma omp parallel for if(batchCount > 1)
                       for(size_t b = 0; b < batchCount; b++)
                       {
-                          auto* dataPtr = static_cast<uint8_t*>(pristineData.cpuInput.valid.get())
-                                          + b * dataBatchStrideBytes;
+                          auto const* canonical
+                              = static_cast<uint8_t const*>(pristineScale.cpuInput.valid.get())
+                                + b * scaleBatchStrideBytes;
                           auto* scalePtr = gpuScaleBuf.data() + b * scaleBatchStrideBytes;
-                          generateMXInput(hipDataT,
-                                          hipScaleT,
-                                          dataPtr,
-                                          scalePtr,
-                                          rows,
-                                          cols,
-                                          stride,
-                                          transposed,
-                                          isMatrixA ? mxBlock : 1,
-                                          isMatrixA ? 1 : mxBlock,
-                                          isMatrixA,
-                                          swizzleLayout,
-                                          initModeToMXMethod(dataInitMode),
-                                          -1.0f,
-                                          1.0f,
-                                          initModeToMXMethod(scaleInitMode));
+                          if(kFast && compactKBlocks != paddedKBlocks)
+                          {
+                              size_t const compactRow = compactKBlocks * scaleElemSize;
+                              size_t const paddedRow  = paddedKBlocks * scaleElemSize;
+                              for(size_t f = 0; f < compactFree; f++)
+                                  std::memcpy(scalePtr + f * compactRow,
+                                              canonical + f * paddedRow,
+                                              compactRow);
+                          }
+                          else
+                          {
+                              std::memcpy(scalePtr, canonical, compactBytes);
+                          }
+                          applyMXScaleLayoutInPlace(scalePtr,
+                                                    compactBytes / scaleElemSize,
+                                                    swizzleLayout,
+                                                    swizzleSlow,
+                                                    swizzleFast,
+                                                    mxBlock);
                       }
                       HIP_CHECK_EXC(hipMemcpy(pristineScale.gpuInput.valid.get(),
                                               gpuScaleBuf.data(),
