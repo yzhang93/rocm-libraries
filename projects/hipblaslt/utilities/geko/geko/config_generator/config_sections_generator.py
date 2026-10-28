@@ -116,6 +116,12 @@ class ConfigSectionGenerator:
         if self._gt.data_type == "X1":
             pt['DataTypeA'] = "S"
             pt['DataTypeB'] = "S"
+        if self._gt.data_type in MIXED_MX_DATA_TYPES:
+            a, b = MIXED_MX_DATA_TYPES[self._gt.data_type]
+            # Tensile defaults MacDataTypeB to DataType (A's type), which makes the kernel treat B
+            # as converted to A's type before the MFMA and drops the scalar scaleA.
+            pt['DataType'], pt['DataTypeB'] = a, b
+            pt['MacDataTypeA'], pt['MacDataTypeB'] = a, b
         pt['DestDataType'] = self._convert_type(self._gt.dest_data_type)
         pt['ComputeDataType'] = self._convert_type(self._gt.compute_data_type)
         pt['HighPrecisionAccumulate'] = val_HighPrecisionAccumulate
@@ -138,7 +144,7 @@ class ConfigSectionGenerator:
         equality = str(self.config.get("LIBRARY_TYPE", "OOB")).lower() == "equality"
         if not (gfx1250_mx and equality):
             pt[f'{epi_tag}UseScaleAlphaVec'] = "1"
-        if not gfx1250_mx and ("8" in pt["DataType"] or "8" in pt["DestDataType"]):
+        if not gfx1250_mx and ("8" in self._gt.data_type or "8" in pt["DestDataType"]):
             pt[f'{epi_tag}UseScaleAB'] = "Scalar"
 
         pt['TransposeA'] = val_transA

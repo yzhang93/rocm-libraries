@@ -429,7 +429,7 @@ See [`tests/README.md`](tests/README.md) for further details on the test layout.
 - `--inline` requires integer M, N, batch, K and `transA`/`transB` ∈ {`N`, `T`}.
 - `--arch` is required with `--tune`.
 - `--arch` is also required whenever `--inline ... MX` is used (needed to resolve the correct MX scale value).
-- `MX: True` (or an MX-only data type such as F4) combined with an ARCH that doesn't support Microscaling (e.g. the gfx942 family) raises an error.
+- `MX: True` (or an MX-only data type such as F4, or the mixed MXFP4/MXFP8 pairs F4F8 and F8F4) combined with an ARCH that doesn't support Microscaling (e.g. the gfx942 family) raises an error.
 
 ---
 

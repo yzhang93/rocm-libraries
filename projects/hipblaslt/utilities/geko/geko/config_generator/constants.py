@@ -7,9 +7,13 @@ VERSION = "2.01"
 # apply value with N_dim <=step
 stepValue_EnqueuesPerSync = [[64*64*8192,200], [256*256*8192,30], [1024*1024*8192,20], [1000000000000000,10]]
 
-dataSize = {'H': 2, 'B': 2, 'S': 4, 'D': 8, 'C': 8, 'Z': 16, 'I8': 1, 'X': 4, 'F8': 1, 'F8N': 1, 'F8B8': 1, 'B8F8': 1, 'X1': 4, 'F4': 1}
+dataSize = {'H': 2, 'B': 2, 'S': 4, 'D': 8, 'C': 8, 'Z': 16, 'I8': 1, 'X': 4, 'F8': 1, 'F8N': 1, 'F8B8': 1, 'B8F8': 1, 'X1': 4, 'F4': 1, 'F4F8': 1, 'F8F4': 1}
 
-LIST_OF_MIN_DIM={'H': 7, 'B': 7, 'S': 3, 'D': 1, 'C': 1, 'Z': 1, 'I8': 7, 'X': 3, 'F8': 7, 'F8N': 7, 'F8B8': 7, 'B8F8': 7, 'X1': 4, 'F4': 7}
+LIST_OF_MIN_DIM={'H': 7, 'B': 7, 'S': 3, 'D': 1, 'C': 1, 'Z': 1, 'I8': 7, 'X': 3, 'F8': 7, 'F8N': 7, 'F8B8': 7, 'B8F8': 7, 'X1': 4, 'F4': 7, 'F4F8': 7, 'F8F4': 7}
+
+# MX pairs with one MXFP4 and one MXFP8 operand. Tensile has no combined type for them, so the
+# ProblemType names A's type in DataType and B's in DataTypeB (and the MFMA input types to match).
+MIXED_MX_DATA_TYPES = {'F4F8': ('F4', 'F8'), 'F8F4': ('F8', 'F4')}
 
 depthURange = {}  # [for small/mid MT], [for large  MT]
 depthURange['H'] = [[64,128,256,512], [32,64,128,256], [32,64,128], [32,64]]
@@ -27,8 +31,10 @@ depthURange['F8B8'] = depthURange['F8']
 depthURange['B8F8'] = depthURange['F8']
 # fp4 MI16x16x128: DepthU must be a multiple of 2*MI_K = 256.
 depthURange['F4'] = [[256,512,768,1024], [256,512,768], [256,512], [256]]
+depthURange['F4F8'] = depthURange['F4']
+depthURange['F8F4'] = depthURange['F4']
 
-computeDataTypeSize = {'H': 4, 'B': 4, 'S': 4, 'D': 8, 'C': 8, 'Z': 16, 'I8': 4, 'X': 4, 'F8': 4, 'F8N': 4, 'F8B8': 4, 'B8F8': 4, 'X1': 4, 'F4': 4}
+computeDataTypeSize = {'H': 4, 'B': 4, 'S': 4, 'D': 8, 'C': 8, 'Z': 16, 'I8': 4, 'X': 4, 'F8': 4, 'F8N': 4, 'F8B8': 4, 'B8F8': 4, 'X1': 4, 'F4': 4, 'F4F8': 4, 'F8F4': 4}
 
 
 # TODO update for every new arch, or import from tensilelite commons
@@ -48,6 +54,8 @@ validMFMA["B8"] = validMFMA["F8"]
 validMFMA["F8N"] = validMFMA["F8"]
 validMFMA["F8B8"] = validMFMA["F8"]
 validMFMA["B8F8"] = validMFMA["F8"]
+validMFMA["F4F8"] = validMFMA["F4"]
+validMFMA["F8F4"] = validMFMA["F4"]
 validMFMA["I8_908"] = [[32,32,4,2], [32,32,8,1], [16,16,4,4], [16,16,16,1], [4,4,4,16]]
 validMFMA["I8_940"] = [[32,32,4,2], [32,32,16,1], [16,16,4,4], [16,16,32,1], [4,4,4,16]]
 validMFMA["I8"] = validMFMA["H"] + validMFMA["F8"]
@@ -77,6 +85,8 @@ def _build_mt_max_size(large: int, regular: int):
         'F8B8': large,
         'B8F8': large,
         'F4': large,
+        'F4F8': large,
+        'F8F4': large,
     }
 
 
@@ -159,6 +169,16 @@ ONLY_INCLUDE_MIs_GFX950 = {
         [32, 32, 64, 1],
     ],
     'B8F8':  # similar to I8
+    [
+        [16, 16, 128, 1],
+        [32, 32, 64, 1],
+    ],
+    'F4F8':  # mixed MXFP4 x MXFP8, same f8f6f4 MFMAs as F4
+    [
+        [16, 16, 128, 1],
+        [32, 32, 64, 1],
+    ],
+    'F8F4':
     [
         [16, 16, 128, 1],
         [32, 32, 64, 1],

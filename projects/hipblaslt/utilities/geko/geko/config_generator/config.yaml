@@ -18,6 +18,7 @@ TRANSB: 'N'
 #   HHS     → DataType H,    DestDataType H,  ComputeDataType S   (config_HHS.yaml)
 #   XSS     → DataType X,    DestDataType S,  ComputeDataType S   (config_XSS.yaml)
 #   F8B8_SS → DataType F8B8, DestDataType S,  ComputeDataType S   (config_F8B8_SS.yaml; prefix F8B8SS_)
+#   F4F8BS  → DataType F4F8, DestDataType B,  ComputeDataType S   (MXFP4 A x MXFP8 B; F8F4 swaps them; always MX)
 
 DataType: "B"
 DestDataType: "B"

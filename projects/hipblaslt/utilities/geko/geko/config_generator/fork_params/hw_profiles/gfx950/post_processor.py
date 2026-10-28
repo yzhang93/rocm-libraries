@@ -3,7 +3,7 @@
 
 from typing import Any, Callable, Dict, List, Optional, Tuple
 
-from geko.config_generator.constants import get_list_of_mt_max_size
+from geko.config_generator.constants import MIXED_MX_DATA_TYPES, get_list_of_mt_max_size
 from geko.config_generator.mi_designer import MFMA, MIDesign
 from geko.config_generator.fork_params.post_processor import BasePostProcessor, mark_post_process, _mi_matches_mt
 from geko.config_generator.shared_utils import (
@@ -309,6 +309,16 @@ def _mi_base_is_16x16(entry: Dict[str, ForkParameter]) -> bool:
     return mi[0] == 16 and mi[1] == 16
 
 
+def _mi_waves_not_all_along_n(entry: Dict[str, ForkParameter]) -> bool:
+    """False if the MI group puts one wave along M and several along N.
+
+    Mixed MXFP4 x MXFP8 subtile kernels with that wave layout produce wrong results
+    (32x128, 64x128 and 128x128 tiles with 1x4 waves, with or without DirectToLds).
+    """
+    wave_m, wave_n = entry["MatrixInstruction"].values[7:9]
+    return wave_m > 1 or wave_n == 1
+
+
 def _mi_lsu_is_one(entry: Dict[str, ForkParameter]) -> bool:
     """True if the MI group uses LocalSplitU == 1.
 
@@ -342,10 +352,11 @@ class GFX950SubtilePostProcessor(BasePostProcessor):
         mi_groups: GroupDimension,
         ctx: SizeContext,
     ) -> Tuple[Dict[str, ForkParameter], GroupDimension]:
-        """Keep only MI16x16-base groups with LSU=1."""
+        """Keep only MI16x16-base groups with LSU=1 (and, for mixed MX types, waves not all along N)."""
+        mixed = self._gt.data_type in MIXED_MX_DATA_TYPES
         mi_groups = [
             e for e in mi_groups
-            if _mi_base_is_16x16(e) and _mi_lsu_is_one(e)
+            if _mi_base_is_16x16(e) and _mi_lsu_is_one(e) and (not mixed or _mi_waves_not_all_along_n(e))
         ]
         return fork_params, mi_groups
 

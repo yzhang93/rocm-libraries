@@ -37,6 +37,7 @@ from geko.config_generator.constants import (
     ENV_UPDATABLE_KEYS,
     HARDWARE_MAP,
     MAX_NUM_KERNELS_PER_CONFIG,
+    MIXED_MX_DATA_TYPES,
     REQUIRED_CONFIG_FIELDS,
     VALID_BACKENDS,
     VALID_SEARCH_SPACES,
@@ -197,7 +198,7 @@ def resolve_mx_defaults(gemm_configs: List[GemmConfig], arch: str) -> List[GemmC
 
 
 def _apply_config_mx(gemm_configs: List[GemmConfig], config: Dict[str, Any]) -> List[GemmConfig]:
-    """Apply the input config's MX setting to the F4 / F8 log GEMMs that carry no MX format.
+    """Apply the input config's MX setting to the F4 / F8 / mixed F4-F8 log GEMMs that carry no MX format.
 
     A log row carries its MX format in scaleA / scaleB. Rows without one take the
     config's MX / MX_BLOCK / MX_SCALE_TYPE; rows with one must agree with it.
@@ -206,7 +207,7 @@ def _apply_config_mx(gemm_configs: List[GemmConfig], config: Dict[str, Any]) -> 
         return gemm_configs
     out = []
     for gc in gemm_configs:
-        if gc.gemm_type.data_type not in ("F4", "F8"):
+        if gc.gemm_type.data_type not in ("F4", "F8", *MIXED_MX_DATA_TYPES):
             out.append(gc)
             continue
         wanted = GemmConfig(

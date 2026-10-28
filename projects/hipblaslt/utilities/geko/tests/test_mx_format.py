@@ -14,6 +14,8 @@ import yaml
 from geko.config_generator.config_generator import mi_design_mx_options
 from geko.config_generator.config_sections_generator import ConfigSectionGenerator
 from geko.config_generator.constants import mx_format, mx_format_from_scale_code, mx_scale_code
+from geko.config_generator.fork_params.hw_profiles.gfx950.post_processor import GFX950SubtilePostProcessor
+from geko.config_generator.shared_utils import ForkParameter
 from geko.config_generator.load_input_config import (
     apply_input_config_defaults,
     gemm_configs_from_gemm_dataframe,
@@ -27,6 +29,7 @@ from geko.schemas import GemmConfig, GemmType
 _F4 = GemmType.from_tensile("T", "N", "F4", "B", "S")
 _F8 = GemmType.from_tensile("T", "N", "F8", "B", "S")
 _B = GemmType.from_tensile("T", "N", "B", "B", "S")
+_F4F8 = GemmType.from_tensile("T", "N", "F4F8", "B", "S")
 _SIZES = [[256, 256, 1, 256]]
 
 
@@ -71,6 +74,7 @@ def test_scale_values_without_block_scaling() -> None:
         (_F8, {"mx_block": 0}, (False, None, None)),
         (_F4, {"mx_block": 16, "mx_scale_type": "f8"}, (True, 16, "F8")),
         (_F4, {"mx_scale_type": "E8"}, (True, None, None)),
+        (_F4F8, {}, (True, None, None)),
     ],
 )
 def test_gemm_config_mx_spellings(gt: GemmType, kw: dict, expected: tuple) -> None:
@@ -220,11 +224,31 @@ def test_mx_problem_type_and_global_parameters() -> None:
         ConfigSectionGenerator(_config("gfx942", "F4"))
 
 
+@pytest.mark.parametrize("data_type,a,b", [("F4F8", "F4", "F8"), ("F8F4", "F8", "F4")])
+def test_mixed_mx_problem_type(data_type: str, a: str, b: str) -> None:
+    cfg = _config("gfx950", data_type)
+    pt = ConfigSectionGenerator(cfg)._problem_type
+    assert (pt["DataType"], pt["DataTypeB"], pt["MXBlockA"], pt["MXBlockB"]) == (a, b, 32, 32)
+    assert (pt["MacDataTypeA"], pt["MacDataTypeB"]) == (a, b)
+    assert "UseScaleAB" in pt
+    assert cfg["GemmProblem"].name == f"{data_type}BS_TN"
+
+
+@pytest.mark.parametrize("data_type,kept", [("F4F8", 2), ("F8", 3)])
+def test_mixed_mx_subtile_drops_waves_all_along_n(data_type: str, kept: int) -> None:
+    cfg = _config("gfx950", data_type, MX=True, search_space="subtile")
+    mis = [[16, 16, 128, 1, 1, 4, 2, 1, 4], [16, 16, 128, 1, 1, 2, 4, 2, 2], [16, 16, 128, 1, 1, 2, 2, 4, 1]]
+    groups = [{"MatrixInstruction": ForkParameter("MatrixInstruction", mi)} for mi in mis]
+    _, out = GFX950SubtilePostProcessor(cfg).filter_subtile_mi_groups({}, groups, None)
+    assert len(out) == kept
+
+
 @pytest.mark.parametrize(
     "arch,data_type,keys,expected",
     [
         ("gfx950", "F4", {}, ((32, 32), True)),
         ("gfx950", "F8", {"MX": True}, ((32, 32), True)),
+        ("gfx950", "F4F8", {}, ((32, 32), True)),
         ("gfx950", "B", {"search_space": "subtile"}, (None, True)),
         ("gfx950", "B", {}, (None, False)),
         ("gfx1250", "F4", {}, (None, False)),
