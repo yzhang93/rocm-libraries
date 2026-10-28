@@ -90,6 +90,8 @@ class BasePostProcessor(BaseParamBuilder):
             fork_params, mi_groups = getattr(self, method_name)(fork_params, mi_groups, ctx)
         if self.config.get("IGNORE_NON_TEMPORAL", False):
             fork_params = _apply_ignore_non_temporal_filter(fork_params)
+        if self.config.get("POW2_TILES", False):
+            mi_groups = [entry for entry in mi_groups if _mi_is_pow2(entry)]
 
         # Remove DepthU from fork_params if present in all MI groups. The groups
         # were expanded over the full DepthU axis, so drop those it no longer
@@ -169,3 +171,8 @@ def mi_macro_tile(entry: Dict[str, ForkParameter]) -> Tuple[int, int]:
 def _mi_matches_mt(entry: Dict[str, ForkParameter], fixed_MT0: int, fixed_MT1: int) -> bool:
     """Check if an MI group entry's macro tile matches the fixed MT."""
     return mi_macro_tile(entry) == (fixed_MT0, fixed_MT1)
+
+
+def _mi_is_pow2(entry: Dict[str, ForkParameter]) -> bool:
+    """Whether an MI group entry's macro tile is a power of two in both dimensions."""
+    return all(mt > 0 and mt & (mt - 1) == 0 for mt in mi_macro_tile(entry))

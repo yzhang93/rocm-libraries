@@ -261,6 +261,8 @@ class MIDesign:
         max_possible_LSU = int(4 / (mfma.waveN * mfma.waveM))
 
         maxGSU = max(math.floor(size[3]/MinKGSU), 1) 
+        if self.config.get("MAX_GSU"):
+            maxGSU = min(maxGSU, self.config["MAX_GSU"])
 
         # Skip [1, 2], [2, 1], and [1, 1] (and LSU>1) waves for larger sizes 
         if self.config["MI_FILTER"] > 0 and ((size[0] * size[1] > 65536) and (size[0] >= 64 and size[1] >= 64) and (mfma.waveM * mfma.waveN != 4)):
@@ -272,7 +274,7 @@ class MIDesign:
             if ((size[0] < smallest_M_in_MFMA and mfma_params.MT0 > smallest_M_in_MFMA)  or (size[1] < smallest_N_in_MFMA and mfma_params.MT1 > smallest_N_in_MFMA)):
                 continue
 
-            coe = 2 if self.config["StreamK"] else 1
+            coe = self.config.get("EDGE_TILE_RATIO") or (2 if self.config["StreamK"] else 1)
 
             # to remove all MIs that one dimension is edge
             # for M=16< we still want to test MI16x16, rather than just MI4x4

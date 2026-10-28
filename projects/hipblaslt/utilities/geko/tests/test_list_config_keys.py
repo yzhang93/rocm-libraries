@@ -57,10 +57,18 @@ def test_list_rows_carry_the_mx_format(tmp_path: Path, keys: dict, scale: int, f
     assert gc.name == name
 
 
-def test_list_yaml_forwards_epilogue_and_library_keys(tmp_path: Path) -> None:
-    path = _write(tmp_path, {**_TN, "DataType": "F8", "MX_BLOCK": 32, "EPILOGUES": False})
+def test_list_yaml_forwards_tuning_keys(tmp_path: Path) -> None:
+    path = _write(tmp_path, {**_TN, "DataType": "F8", "MX_BLOCK": 32, "EPILOGUES": False, "POW2_TILES": True})
     _, overrides = _rows_from_gemm_config_yaml(path, "gfx1250-strict")
-    assert overrides == {"EPILOGUES": False, "LIBRARY_TYPE": "OOB"}
+    assert overrides == {
+        "EPILOGUES": False,
+        "LIBRARY_TYPE": "OOB",
+        "StreamK": False,
+        "MI_FILTER": 2,
+        "EDGE_TILE_RATIO": None,
+        "POW2_TILES": True,
+        "MAX_GSU": None,
+    }
 
 
 def test_list_yaml_mx_keys_leave_other_log_types_alone(tmp_path: Path) -> None:

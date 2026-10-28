@@ -85,13 +85,16 @@ If the YAML omits them, these are filled from `HARDWARE_MAP[ARCH]` in [`load_inp
 |-----|------|
 | `StreamK` | `True` adds persistent kernels (`TileProcessingStrategy` StreamK, plus DataParallel in the gfx1250 generic space). `False` keeps ordinary one-workgroup-per-tile kernels (`TileProcessingStrategy: None`) |
 | `backend` | `"ductile"` or `"tensile"` (default: `"ductile"`; CLI `--backend` overrides). |
-| `search_space` | `"heuristic"`, `"generic"`, or `"subtile"` (default: auto from `backend` — `generic` for ductile, `heuristic` for tensile). Subtile uses UseSubtileImpl=1 variants with MI16x16-base only, persistent StreamK, CMS off (gfx950 only). For full fork ranges with `backend: tensile`, set `search_space: generic`. |
+| `search_space` | `"heuristic"`, `"generic"`, or `"subtile"` (default: auto from `backend` — `generic` for ductile, `heuristic` for tensile). Subtile uses UseSubtileImpl=1 variants with MI16x16-base only, CMS off (gfx950 only); kernels are persistent StreamK, or data-parallel with `StreamK: False` (e.g. for grouped GEMM). For full fork ranges with `backend: tensile`, set `search_space: generic`. |
 | `MACROTILE_OPT` | Origami macro-tile tuning. Works with the Ductile backend, or with `backend: tensile` when `SIZE_OPTION: 0` (explicit `Sizes:` list); the tensile path emits `Backend: Tensile` and Tensile enumerates the pinned fork space exhaustively. |
 | `MT_DU` | Fixed `[MT0, MT1, DU]` when `MACROTILE_OPT` |
 | `USE_HEURISTICS` | Refined heuristic param lists per size |
 | `ONE_SIZE_PER_CONFIG` | One size per output config file |
 | `CMS` / `CMS_PRIORITY` | CMS optimization / tile priority (defaults **on** for `gfx950`, **off** for gfx942 family) |
 | `MI_FILTER` | MI filtering: `0` none, `1` moderate, `2` aggressive |
+| `EDGE_TILE_RATIO` | With `MI_FILTER` > 0, drop macro tiles more than this multiple of M or N (default: `2` with StreamK, `1` without) |
+| `POW2_TILES` | `True` keeps only power-of-two macro tiles, as grouped GEMM's wave-parallel group search needs |
+| `MAX_GSU` | Largest `GlobalSplitU` the MI designer emits (default: no limit). Grouped GEMM needs `1` |
 | `EPILOGUES` | Include epilogues |
 | `MX` | `True` = MX block scaling on the arch's default block (32) with E8 scales. `F4` is always MX; only `F4` and `F8` take MX |
 | `MX_BLOCK` | MX block size, 16 or 32; setting it turns MX on. `0` forces plain non-MX, which `F4` and `MX: True` reject. MXFP8 is `F8` with 32, NVFP4 is `F4` with 16 |
@@ -101,7 +104,7 @@ If the YAML omits them, these are filled from `HARDWARE_MAP[ARCH]` in [`load_inp
 
 With `SIZE_OPTION: 2`, each log row's `scaleA` / `scaleB` gives its MX format. The MX keys apply to the log's `F4` / `F8` rows that carry none, and must agree with the rows that do. Output files of an MX format the data type does not imply are tagged with it, e.g. `F8BS_MXE8B32_TN_0.yaml` (MXFP8) or `F4BS_MXF8B16_TN_0.yaml` (NVFP4).
 
-With `--tune` (the `geko` CLI), this file supplies the GEMM problems, each with its MX format (`MX`, `MX_BLOCK`, `MX_SCALE_TYPE`), and the keys `EPILOGUES` and `LIBRARY_TYPE` (`LIST_FORWARDED_KEYS` in [`constants.py`](constants.py)); architecture, backend and search space come from the command line, and other keys are ignored. `scripts/config_generator.py --config` applies every key.
+With `--tune` (the `geko` CLI), this file supplies the GEMM problems, each with its MX format (`MX`, `MX_BLOCK`, `MX_SCALE_TYPE`), and the keys `EPILOGUES`, `LIBRARY_TYPE`, `StreamK`, `MI_FILTER`, `EDGE_TILE_RATIO`, `POW2_TILES` and `MAX_GSU` (`LIST_FORWARDED_KEYS` in [`constants.py`](constants.py)); architecture, backend and search space come from the command line, and other keys are ignored. `scripts/config_generator.py --config` applies every key.
 
 ### Environment variable override
 
