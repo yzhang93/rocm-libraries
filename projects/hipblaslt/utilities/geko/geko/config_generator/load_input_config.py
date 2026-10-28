@@ -430,9 +430,8 @@ def apply_input_config_defaults(config: Dict[str, Any]) -> None:
                 )
 
     if ss == "subtile":
-        # Subtile tuning requires a persistent StreamK strategy (self-healed downstream)
-        # and runs with CMS disabled.
-        config["StreamK"] = True
+        # Subtile tuning runs with CMS disabled. StreamK picks persistent StreamK
+        # (default) or data-parallel kernels, e.g. for grouped GEMM.
         config["CMS"] = False
         config["CMS_PRIORITY"] = False
 

@@ -1,7 +1,6 @@
 # Copyright Advanced Micro Devices, Inc., or its affiliates.
 # SPDX-License-Identifier: MIT
 
-import warnings
 from typing import Any, Dict, List, Optional, Tuple
 
 from geko.config_generator.constants import dataSize
@@ -535,6 +534,8 @@ class GFX950SubtileParams(BaseOptimizationParams):
 
     Flat parameter set for subtile macro-tile tuning. MI filtering
     (16x16 base, LSU=1) is handled by GFX950SubtilePostProcessor.
+    With StreamK the runtime (origami) picks WGM / WGMXCC; with StreamK off the
+    kernels are data-parallel and the search picks them.
     """
 
     @param
@@ -563,7 +564,12 @@ class GFX950SubtileParams(BaseOptimizationParams):
 
     @param
     def work_group_mapping(self, ctx: SizeContext) -> ForkParameter:
-        return self._make_param("WorkGroupMapping", [0])
+        if self.config.get("StreamK", False):
+            return self._make_param("WorkGroupMapping", [0])
+        return self._make_param(
+            "WorkGroupMapping",
+            [-48, -32, -24, -16, -8, -6, -4, -2, -1, 0, 2, 4, 6, 8, 16, 24, 32, 48],
+        )
 
     @param
     def vector_width_a(self, ctx: SizeContext) -> ForkParameter:
@@ -579,7 +585,9 @@ class GFX950SubtileParams(BaseOptimizationParams):
 
     @param
     def work_group_mapping_xcc(self, ctx: SizeContext) -> ForkParameter:
-        return self._make_param("WorkGroupMappingXCC", [-1])
+        if self.config.get("StreamK", False):
+            return self._make_param("WorkGroupMappingXCC", [-1])
+        return self._make_param("WorkGroupMappingXCC", [1, 2, 4, 8, 16, 32])
 
     @param
     def prefetch_global_read(self, ctx: SizeContext) -> ForkParameter:
@@ -587,16 +595,15 @@ class GFX950SubtileParams(BaseOptimizationParams):
 
     @param
     def tile_processing_strategy(self, ctx: SizeContext) -> ForkParameter:
-        if not self.config.get("StreamK", False):
-            warnings.warn(
-                "StreamK is disabled but subtile requires TileProcessingStrategy=StreamK; forcing it.",
-                stacklevel=2,
-            )
-        return self._make_param("TileProcessingStrategy", ["StreamK"])
+        if self.config.get("StreamK", False):
+            return self._make_param("TileProcessingStrategy", ["StreamK"])
+        return self._make_param("TileProcessingStrategy", ["None"])
 
     @param
-    def work_assignment(self, ctx: SizeContext) -> ForkParameter:
-        return self._make_param("WorkAssignment", ["StaticGrid"])
+    def work_assignment(self, ctx: SizeContext) -> Optional[ForkParameter]:
+        if self.config.get("StreamK", False):
+            return self._make_param("WorkAssignment", ["StaticGrid"])
+        return None
 
     @param
     def persistent_xcc_mapping(self, ctx: SizeContext) -> ForkParameter:

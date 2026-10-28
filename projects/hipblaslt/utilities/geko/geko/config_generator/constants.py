@@ -524,6 +524,13 @@ _CONFIG_OPTIONAL_COMMON = {
     "SIZE_OPTION": 0,
     "ONE_SIZE_PER_CONFIG": True,
     "MI_FILTER": 2,
+    # Largest macro tile kept by the MI designer, as a multiple of the problem's M or N
+    # (default: 2 for Stream-K, 1 for data-parallel).
+    "EDGE_TILE_RATIO": None,
+    # Keep only power-of-two macro tiles (e.g. for grouped GEMM's wave-parallel group search).
+    "POW2_TILES": False,
+    # Largest GlobalSplitU the MI designer emits (default: no limit; 1 for grouped GEMM).
+    "MAX_GSU": None,
     "EPILOGUES": True,
     "CLUSTER": 0,
     "DUCTILE_VALIDATION_PROFILE": 1,
@@ -542,7 +549,15 @@ ENV_UPDATABLE_KEYS = {
 # would otherwise fall back to their defaults. The MX format needs no entry:
 # each row carries it as its hipBLASLt scaleA / scaleB value, which is decoded
 # again when the rows are grouped into GemmConfigs, as for a workload log.
-LIST_FORWARDED_KEYS = ("EPILOGUES", "LIBRARY_TYPE")
+LIST_FORWARDED_KEYS = (
+    "EPILOGUES",
+    "LIBRARY_TYPE",
+    "StreamK",
+    "MI_FILTER",
+    "EDGE_TILE_RATIO",
+    "POW2_TILES",
+    "MAX_GSU",
+)
 
 _CMS_DEFAULTS_GFX950 = {"CMS": True, "CMS_PRIORITY": False}
 _CMS_DEFAULTS_GFX942_FAMILY = {"CMS": False, "CMS_PRIORITY": False, "StreamK": False}

@@ -299,6 +299,7 @@ SUBTILE_ACTIVE_PARAMS = frozenset({
     "NonTemporalC",
     "NonTemporalD",
     "PrefetchGlobalRead",
+    "UseCustomMainLoopSchedule",
 })
 
 
@@ -378,16 +379,11 @@ class GFX950SubtilePostProcessor(BasePostProcessor):
         return fork_params, mi_groups
 
     def _apply_mt_du(self, fork_params, mi_groups, mt_du):
-        """Subtile-specific MT_DU overrides."""
+        """Subtile-specific MT_DU overrides; the persistent ones only with StreamK."""
         fixed_MT0, fixed_MT1, fixed_DU = mt_du[0], mt_du[1], mt_du[2]
 
         overrides = {
             "DepthU": [fixed_DU],
-            "WorkGroupMapping": [0],
-            "WorkGroupMappingXCC": [-1],
-            "PersistentXCCMapping": [0],
-            "TileProcessingStrategy": ["StreamK"],
-            "WorkAssignment": ["StaticGrid"],
             "UseSubtileImpl": [True],
             "UseCustomMainLoopSchedule": [0],
             "PrefetchGlobalRead": [0, 1, 2],
@@ -395,6 +391,14 @@ class GFX950SubtilePostProcessor(BasePostProcessor):
             "VectorWidthA": [1],
             "VectorWidthB": [1],
         }
+        if self._origami_picks_wgm():
+            overrides.update({
+                "WorkGroupMapping": [0],
+                "WorkGroupMappingXCC": [-1],
+                "PersistentXCCMapping": [0],
+                "TileProcessingStrategy": ["StreamK"],
+                "WorkAssignment": ["StaticGrid"],
+            })
         for name, values in overrides.items():
             if name in fork_params:
                 fork_params[name].values = values

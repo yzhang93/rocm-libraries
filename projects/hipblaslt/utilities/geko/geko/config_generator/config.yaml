@@ -59,7 +59,8 @@ Sizes:
 # backend: ductile         # "ductile" or "tensile" (default: ductile; CLI --backend overrides)
 # search_space:            # "heuristic", "generic", or "subtile" (default: auto from backend).
                            #   "subtile" (gfx950 only) tunes macro tiles via
-                           #   UseSubtileImpl=1 (MI16x16 base, persistent StreamK, CMS off).
+                           #   UseSubtileImpl=1 (MI16x16 base, CMS off); persistent StreamK,
+                           #   or data-parallel with StreamK: False.
 # MACROTILE_OPT: False     # Origami MT tuning (Ductile only)
 # MT_DU: None              # Fixed [MT0, MT1, DU] for MACROTILE_OPT
 # USE_HEURISTICS: False    # Refined heuristic param lists per size
@@ -68,6 +69,9 @@ Sizes:
 # CMS: True                # CMS optimization (default True for gfx950, False for gfx942*)
 # CMS_PRIORITY: True       # Prioritize CMS tiles (same ARCH rule as CMS)
 # MI_FILTER: 2             # MI filtering aggressiveness (0=none, 1=moderate, 2=aggressive)
+# EDGE_TILE_RATIO: None    # Max macro tile as a multiple of M or N (default 2 with StreamK, else 1)
+# POW2_TILES: False        # Keep only power-of-two macro tiles (grouped GEMM group search)
+# MAX_GSU: None            # Largest GlobalSplitU emitted (default no limit; 1 for grouped GEMM)
 # EPILOGUES: True          # Include epilogues in tuning
 # CLUSTER: 0               # 0=all-in-one, 1=cluster by top MI
 # MAX_NUM_KERNELS_PER_CONFIG: 180000000  # Kernel cap per config (heuristic only; ignored for generic search space)
