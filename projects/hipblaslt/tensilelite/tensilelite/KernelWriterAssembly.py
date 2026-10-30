@@ -5783,7 +5783,7 @@ class KernelWriterAssembly(KernelWriter):
   # K_pad = 1 for A/B, 256 for MX scale (matches host rearrangePaddedMXScaleLayout).
   # Precondition: upstream Srd+2 is computeLoadSrd's tile-boundary limit
   # (useFixedSrd2 + non-isConstUnitStride); PGR/mainloop GR_INC only touch Srd+0/+1.
-  # tPs must share kPad and bpe_K_byteStride (delta emitted once, reused).
+  # tPs must share kPad (delta_K emitted once); bpe_K_byteStride may differ.
   ##############################################################################
   def computeTailLoopSrdLimit(self, kernel, tPs):
     module = Module("computeTailLoopSrdLimit")
@@ -5837,17 +5837,20 @@ class KernelWriterAssembly(KernelWriter):
         bpeForLimit = float(tP["bpeGR"])
       tcKpadBpeList.append((tc, kPad, bpeForLimit))
 
-    # Joint emission requires uniform kPad/bpe across all tPs (true for A/B
-    # symmetric configs and for MXSA/MXSB scale pairs in the gauntlet).
+    # Joint emission requires uniform kPad across all tPs (true for A/B and for
+    # MXSA/MXSB scale pairs). bpe may differ between A and B with mixed MX
+    # operands (e.g. MXFP4 x MXFP8); delta_K is shared and delta_bytes is
+    # computed per bpe.
     kPad = tcKpadBpeList[0][1]
     bpeForLimit = tcKpadBpeList[0][2]
-    if any(kp != kPad or bp != bpeForLimit for _, kp, bp in tcKpadBpeList):
+    if any(kp != kPad for _, kp, _ in tcKpadBpeList):
       return module
     tcs = [t for t, _, _ in tcKpadBpeList]
     isMx = tcs[0] in ("MXSA", "MXSB")
+    mixedBpe = any(bp != bpeForLimit for _, _, bp in tcKpadBpeList)
     loopCounterName = self.loopCounterName(kernel, self.states.unrollIdx)
 
-    with self.allocTmpSgpr(1, tag="computeTailLoopSrdLimit_tmpSgprInfo") as tmpSgprInfo:
+    with self.allocTmpSgpr(2 if mixedBpe else 1, tag="computeTailLoopSrdLimit_tmpSgprInfo") as tmpSgprInfo:
       stmp = tmpSgprInfo.idx
       module.addComment1(
         "Tighten Srd{%s}+2 for tail loop: -= (DepthU - roundUp(K_rem,%u)) * %s"
@@ -5868,6 +5871,15 @@ class KernelWriterAssembly(KernelWriter):
         # so the boundary DTL load doesn't need to bump Srd+2).
         module.add(SSubU32(dst=sgpr(stmp), src0=depthU, src1=sgpr(loopCounterName),
                            comment="delta_K = DepthU - K_rem"))
+
+      if mixedBpe:
+        for tc, _, bpe in tcKpadBpeList:
+          module.add(scalarMultiplyBpe(stmp + 1, stmp, bpe,
+                                       comment="delta_bytes for %s" % tc))
+          module.add(SSubU32(dst=sgpr("Srd%s+2" % tc), src0=sgpr("Srd%s+2" % tc),
+                             src1=sgpr(stmp + 1),
+                             comment="Srd%s+2 -= delta_bytes (tail-loop tight)" % tc))
+        return module
 
       # delta_bytes = delta_K * bpe_K_byteStride (handles bpe=0.5 via SShr 1)
       module.add(scalarMultiplyBpe(stmp, stmp, bpeForLimit,
