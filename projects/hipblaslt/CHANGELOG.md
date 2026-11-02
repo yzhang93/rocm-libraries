@@ -6,7 +6,8 @@ Full documentation for hipBLASLt is available at [rocm.docs.amd.com/projects/hip
 
 ### Added
 
-* `A2AGemm` mode for the `FusedA2A` TensileLite problem-type parameter (TensileLite only, bf16 B): gathers B's K shards from the peers inside the GEMM kernel, and the `A2ASubRounds` solution parameter (`1`, `2` or `4`) splits each shard into sub-rounds. Validated on gfx950 only.
+* `A2AGemm` mode for the `FusedA2A` TensileLite problem-type parameter (bf16 B): gathers B's K shards from the peers inside the GEMM kernel, and the `A2ASubRounds` solution parameter (`1`, `2` or `4`) splits each shard into sub-rounds. Validated on gfx950 only.
+* Fused all-to-all prologue, in builds with `HIPBLASLT_ENABLE_GEMM_A2A_FUSION`: `hipblasLtFusedPrologueAdd` with `HIPBLASLT_FUSEABLE_PROLOGUE_A2A_PREFIX`, attached through `HIPBLASLT_MATMUL_DESC_FUSED_PROLOGUE`, gathers B across the registered ranks before the GEMM (`FusedA2A: A2AGemm`), with the peer-B and gather-buffer attributes `HIPBLASLT_FUSED_PROLOGUE_A2A_PREFIX_PEER_B_PTRS` and `HIPBLASLT_FUSED_PROLOGUE_A2A_PREFIX_GATHER_BUFFER`; tuned for gfx950 bf16. `hipblaslt-bench-a2a` gains `--a2a_mode a2a-gemm`.
 * `HIPBLASLT_CHECK_SYNCHRONIZER` environment variable: opt-in post-launch
   dirty-buffer check for the handle's inter-workgroup flag buffers, which their
   kernels must leave at zero (`1`, `on` or `true` to enable; anything else
