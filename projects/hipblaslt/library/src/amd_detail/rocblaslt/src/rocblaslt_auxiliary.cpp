@@ -2268,9 +2268,9 @@ rocblaslt_status rocblaslt_matmul_desc_set_attribute(rocblaslt_matmul_desc      
             case ROCBLASLT_MATMUL_DESC_FUSED_EPILOGUE:
                 // Stored as a non-owning handle. The stage-level validation lives in the
                 // hipBLASLt C-API layer, which is where the descriptor's contents are visible.
-                if(sizeof(const hipblasLtFusedEpilogueDescriptor*) <= sizeInBytes)
+                if(sizeof(const hipblasLtFusionDescriptor*) <= sizeInBytes)
                 {
-                    const hipblasLtFusedEpilogueDescriptor* fused = nullptr;
+                    const hipblasLtFusionDescriptor* fused = nullptr;
                     memcpy(&fused, buf, sizeof(fused));
                     matmulDesc->fused_epilogue = fused;
                 }
@@ -2281,9 +2281,9 @@ rocblaslt_status rocblaslt_matmul_desc_set_attribute(rocblaslt_matmul_desc      
                 }
                 break;
             case ROCBLASLT_MATMUL_DESC_FUSED_PROLOGUE:
-                if(sizeof(const hipblasLtFusedEpilogueDescriptor*) <= sizeInBytes)
+                if(sizeof(const hipblasLtFusionDescriptor*) <= sizeInBytes)
                 {
-                    const hipblasLtFusedEpilogueDescriptor* fused = nullptr;
+                    const hipblasLtFusionDescriptor* fused = nullptr;
                     memcpy(&fused, buf, sizeof(fused));
                     matmulDesc->fused_prologue = fused;
                 }
@@ -2719,8 +2719,8 @@ rocblaslt_status rocblaslt_matmul_desc_get_attribute(rocblaslt_matmul_desc      
 #if HIPBLASLT_HAS_GEMM_A2A_FUSION
             case ROCBLASLT_MATMUL_DESC_FUSED_EPILOGUE:
                 if(sizeWritten)
-                    *sizeWritten = sizeof(const hipblasLtFusedEpilogueDescriptor*);
-                if(sizeInBytes < sizeof(const hipblasLtFusedEpilogueDescriptor*))
+                    *sizeWritten = sizeof(const hipblasLtFusionDescriptor*);
+                if(sizeInBytes < sizeof(const hipblasLtFusionDescriptor*))
                 {
                     log_error(__func__, "invalid fused_epilogue buf size", sizeInBytes);
                     return rocblaslt_status_invalid_value;
@@ -2729,8 +2729,8 @@ rocblaslt_status rocblaslt_matmul_desc_get_attribute(rocblaslt_matmul_desc      
                 break;
             case ROCBLASLT_MATMUL_DESC_FUSED_PROLOGUE:
                 if(sizeWritten)
-                    *sizeWritten = sizeof(const hipblasLtFusedEpilogueDescriptor*);
-                if(sizeInBytes < sizeof(const hipblasLtFusedEpilogueDescriptor*))
+                    *sizeWritten = sizeof(const hipblasLtFusionDescriptor*);
+                if(sizeInBytes < sizeof(const hipblasLtFusionDescriptor*))
                 {
                     log_error(__func__, "invalid fused_prologue buf size", sizeInBytes);
                     return rocblaslt_status_invalid_value;
