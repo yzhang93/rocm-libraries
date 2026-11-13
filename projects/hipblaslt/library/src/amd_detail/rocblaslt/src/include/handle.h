@@ -360,6 +360,11 @@ struct _rocblaslt_matmul_desc
     void*       scaleE    = nullptr;
     void*       amaxD     = nullptr;
     hipDataType bias_type = HIPBLASLT_DATATYPE_INVALID;
+    // MoE sorted token layout
+    const void* moeSortedExpertIds = nullptr;
+    const void* moeNumValidIds     = nullptr;
+    const void* moeSortedIds       = nullptr;
+    int32_t     moeSortedIdsDivisor = 1;
     // E
     void*       e        = nullptr;
     hipDataType aux_type = HIPBLASLT_DATATYPE_INVALID;
@@ -436,6 +441,10 @@ struct _rocblaslt_matmul_desc
         this->pointermode             = src.pointermode;
         this->amaxD                   = src.amaxD;
         this->bias_type               = src.bias_type;
+        this->moeSortedExpertIds      = src.moeSortedExpertIds;
+        this->moeNumValidIds          = src.moeNumValidIds;
+        this->moeSortedIds            = src.moeSortedIds;
+        this->moeSortedIdsDivisor     = src.moeSortedIdsDivisor;
         this->e                       = src.e;
         this->aux_type                = src.aux_type;
         this->lde                     = src.lde;

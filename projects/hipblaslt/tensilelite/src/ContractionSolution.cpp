@@ -2805,6 +2805,23 @@ namespace TensileLite
             rv.args.append<int64_t>("batchOffsetB", inputs.batchOffsetB);
         }
 
+        // The MoE sorted-layout pointers follow batchOffsets in the kernel signature.
+        if(problemType.moeSortedLayout)
+        {
+            rv.args.append<void const*>("moeSortedExpertIds", inputs.moeSortedExpertIds);
+            rv.args.append<void const*>("moeNumValidIds", inputs.moeNumValidIds);
+            if(problemType.moeSortedLayout == 2)
+            {
+                rv.args.append<void const*>("moeSortedIds", inputs.moeSortedIds);
+                // row = mulhi(id, ceil(2^32 / divisor)): exact for ids below 2^24 and divisors
+                // below 256. 0 means divisor 1 (no division).
+                uint32_t const d = std::max<uint32_t>(inputs.moeSortedIdsDivisor, 1);
+                uint32_t const magic
+                    = d == 1 ? 0 : static_cast<uint32_t>(((uint64_t(1) << 32) + d - 1) / d);
+                rv.args.append<uint32_t>("moeRowDivMagic", magic);
+            }
+        }
+
         // The fused GEMM+A2A segment follows batchOffsets in the kernel signature.
         if(problem.fusedGemmA2A())
             appendFusedSegment(rv.args,

@@ -2690,6 +2690,62 @@ class KernelWriterAssembly(KernelWriter):
       module.add(padNoExitLabel)
     return module
 
+  ##############################################################################
+  # MoESortedLayout: look up this N tile's expert and exit tiles past
+  # num_valid_ids or with a negative expert id. N tile wg1 covers sorted rows
+  # [wg1*MT1, (wg1+1)*MT1), one sort block. Leaves the expert in moeExpertSgpr
+  # (read by computeLoadSrd for A and MXSA) and, for mode 2, the sorted_ids
+  # address of this tile's first row in moeSortedIdsSgpr and the row divisor's
+  # magic multiplier in moeRowDivMagicSgpr (read by the subtile B row gather).
+  ##############################################################################
+  def moeSetup(self, kernel):
+    module = Module("moeSetup")
+    mode = kernel["ProblemType"]["MoESortedLayout"]
+    if not mode:
+      return module
+    module.addComment1("MoE sorted layout: expert of this N tile, exit past num_valid_ids")
+    argBase = self.states.moeKernArgBase
+    self.states.moeExpertSgpr = self.sgprPool.checkOut(1, tag="moeExpert", preventOverflow=False)
+    if mode == 2:
+      self.states.moeSortedIdsSgpr = self.sgprPool.checkOutAligned(2, 2, tag="moeSortedIds", preventOverflow=False)
+      self.states.moeRowDivMagicSgpr = self.sgprPool.checkOut(1, tag="moeRowDivMagic", preventOverflow=False)
+    keepLabel = Label(self.labels.getNameInc("MoE_TileValid"), "")
+    with self.allocTmpSgpr(6, 2, tag="moeSetup_tmpSgpr") as tmp:
+      t = tmp.idx
+      module.add(SLoadB64(dst=sgpr(t, 2), base=sgpr("KernArgAddress", 2), soffset=hex(argBase),
+                          comment="load moeSortedExpertIds"))
+      module.add(SLoadB64(dst=sgpr(t+2, 2), base=sgpr("KernArgAddress", 2), soffset=hex(argBase + 8),
+                          comment="load moeNumValidIds"))
+      if mode == 2:
+        module.add(SLoadB64(dst=sgpr(self.states.moeSortedIdsSgpr, 2), base=sgpr("KernArgAddress", 2),
+                            soffset=hex(argBase + 16), comment="load moeSortedIds"))
+        module.add(SLoadB32(dst=sgpr(self.states.moeRowDivMagicSgpr), base=sgpr("KernArgAddress", 2),
+                            soffset=hex(argBase + 24), comment="load moeRowDivMagic"))
+      module.add(SLShiftLeftB32(dst=sgpr(t+5), src=sgpr("WorkGroup1"), shiftHex=2, comment="wg1 * 4 bytes"))
+      module.add(SWaitCnt(kmcnt=0, comment="wait for MoE pointers"))
+      module.add(SAddU32(dst=sgpr(t), src0=sgpr(t), src1=sgpr(t+5), comment="&sorted_expert_ids[wg1]"))
+      module.add(SAddCU32(dst=sgpr(t+1), src0=sgpr(t+1), src1=0, comment="&sorted_expert_ids[wg1]"))
+      module.add(SLoadB32(dst=sgpr(t+4), base=sgpr(t+2, 2), soffset=0, comment="num_valid_ids"))
+      module.add(SLoadB32(dst=sgpr(self.states.moeExpertSgpr), base=sgpr(t, 2), soffset=0,
+                          comment="expert = sorted_expert_ids[wg1]"))
+      module.add(SMulI32(dst=sgpr(t+5), src0=sgpr("WorkGroup1"), src1=kernel["MacroTile1"],
+                         comment="first sorted row = wg1 * MT1"))
+      module.add(SWaitCnt(kmcnt=0, comment="wait for expert and num_valid_ids"))
+      exitLabel = Label(self.labels.getNameInc("MoE_TileSkip"), "")
+      module.add(SCmpLtI32(src0=sgpr(self.states.moeExpertSgpr), src1=0, comment="expert on another rank?"))
+      module.add(SCBranchSCC1(labelName=exitLabel.getLabelName()))
+      module.add(SCmpLtU32(src0=sgpr(t+5), src1=sgpr(t+4), comment="tile holds valid rows?"))
+      module.add(SCBranchSCC1(labelName=keepLabel.getLabelName()))
+      module.add(exitLabel)
+      module.add(SEndpgm(comment="tile past num_valid_ids or of a negative expert: exit before any load/barrier"))
+      module.add(keepLabel)
+      if mode == 2:
+        sids = self.states.moeSortedIdsSgpr
+        module.add(SLShiftLeftB32(dst=sgpr(t+5), src=sgpr(t+5), shiftHex=2, comment="first row * 4 bytes"))
+        module.add(SAddU32(dst=sgpr(sids), src0=sgpr(sids), src1=sgpr(t+5), comment="&sorted_ids[wg1*MT1]"))
+        module.add(SAddCU32(dst=sgpr(sids+1), src0=sgpr(sids+1), src1=0, comment="&sorted_ids[wg1*MT1]"))
+    return module
+
   def computeMulticastMaskReduction(self, kernel, module, sgprWgX, sgprWgY, maskColSgpr, maskRowSgpr):
     """Emit the per-cluster reduced broadcast-bit masks for the padded edge-size path.
 
@@ -5126,6 +5182,14 @@ class KernelWriterAssembly(KernelWriter):
 
     allocateTensor2dSize = use64bShadowLimit and not useFixedSrd2
     numDim = len(indices)
+    # MoESortedLayout: A and its scales take the tile's expert as the batch index;
+    # gathered B rows are absolute, so B's SRD spans the whole B tensor.
+    moeMode = kernel["ProblemType"]["MoESortedLayout"]
+    assert not moeMode or useSubtile, "MoESortedLayout is implemented on the subtile path only"
+    batchWgSgpr = self.states.moeExpertSgpr if moeMode and tc in ("A", "MXSA") else "WorkGroup2"
+    moeGatherB = moeMode == 2 and tc == "B"
+    if moeGatherB:
+      assert useFixedSrd2 and self.states.groOffsetInMacroTile, "MoE B row gather needs the subtile SRD path"
     with self.allocTmpSgpr(2 + 2 + (0 if allocateTensor2dSize else 2), tag="computeLoadSrd_tmpSgprInfo") as tmpSgprInfo:
       stmp = tmpSgprInfo.idx
       tileStart = stmp+2
@@ -5148,7 +5212,21 @@ class KernelWriterAssembly(KernelWriter):
         #tP['ia'][1]
 
         # This is guaranteed to fit in 32-bit since the WG*MT is a number of elements in some unsigned direction:
-        if useFixedSrd2:
+        if moeGatherB:
+          # The batch stride of B holds rowsB * strideB (batch count is 1), so the last
+          # valid row starts at batchStride - strideB. Row offsets come from sorted_ids;
+          # the padding row id (rowsB) and beyond fall past Srd+2 and read zeros.
+          strideRow = self.strideRef(tc, tP['tileIdx'])
+          batchStride = None
+          for i in range(1, numDim):
+            if indices[i] in kernel["ProblemType"]["IndicesBatch"]:
+              batchStride = sgpr("Stride%s%s"%(tc, self.states.indexChars[tP['ia'][i]]))
+          assert batchStride is not None, "MoE B row gather needs a batched problem"
+          module.add(SMovB64(dst=sgpr(tileStart, 2), src=0, comment="MoE gather: B rows are absolute"))
+          module.add(SSubU32(dst=sgpr(stmp+0), src0=batchStride, src1=strideRow, comment="(rowsB - 1) * strideB"))
+          module.add(SAddU32(dst=sgpr(stmp+0), src0=sgpr(stmp+0), src1=kernel["DepthU"], comment="+ DepthU (one K step)"))
+          module.add(scalarMultiplyBpe("Srd%s+2"%tc, stmp+0, float(tP["bpeGR"]), comment="buffer_load limit for gathered B"))
+        elif useFixedSrd2:
           # UseSubtileImpl fixedSrd2 case (including swizzle and nonSwizzle): tile start uses roundup(MT/swizzleSize0)
           mt = roundUp(kernel[tP["mt"]] / swizzleSize0)
           module.addModuleAsFlatItems(self.s_mul_u64_u32(sgpr(tileStart+0), sgpr(tileStart+1), sgpr(tP["wg"]), mt, comment="WorkGroup[01] * roundup(MT/%u)"%swizzleSize0))
@@ -5163,7 +5241,9 @@ class KernelWriterAssembly(KernelWriter):
         # formula.  TLU=0 already resolves to the same register.
         if isMxSwizzledScaleLayout and self.isConstUnitStride(strideF):
           strideF = sgpr("Strides%s"%tc)
-        if not self.isConstUnitStride(strideF):
+        if moeGatherB:
+          pass  # tileStart and Srd+2 are set above
+        elif not self.isConstUnitStride(strideF):
           if useFixedSrd2:
             # Tile-boundary SRD+2 for UseSubtileImpl (unified for MX scale and data A/B).
             # Avoids 32-bit overflow from computing full tensor2dSize when N*K or M*K > 2^32.
@@ -5375,10 +5455,10 @@ class KernelWriterAssembly(KernelWriter):
             module.add(SBranch(labelName=stridedBatchedGemmLoad.getLabelName()))
           moduleLoadGeneralBatch.add(SMulI32(dst=sgpr(stmp+0), src0=8, src1=sgpr("WorkGroup2"), comment="Compute Offset into Pointer Array"))             
           if not wroteTileStart:
-            moduleLoadStridedBatch.addModuleAsFlatItems(self.s_mul_u64_u32(sgpr(tileStart+0), sgpr(tileStart+1), sgpr(stride), sgpr("WorkGroup2"), comment="Stride*WG"))
+            moduleLoadStridedBatch.addModuleAsFlatItems(self.s_mul_u64_u32(sgpr(tileStart+0), sgpr(tileStart+1), sgpr(stride), sgpr(batchWgSgpr), comment="Stride*WG"))
             wroteTileStart = True
           else:
-            moduleLoadStridedBatch.addModuleAsFlatItems(self.s_mul_u64_u32(sgpr(stmp+0), sgpr(stmp+1), sgpr(stride), sgpr("WorkGroup2"), comment="Stride*WG"))
+            moduleLoadStridedBatch.addModuleAsFlatItems(self.s_mul_u64_u32(sgpr(stmp+0), sgpr(stmp+1), sgpr(stride), sgpr(batchWgSgpr), comment="Stride*WG"))
             moduleLoadStridedBatch.add(SAddU32(dst=sgpr(tileStart+0), src0=sgpr(tileStart+0), src1=sgpr(stmp+0), comment="accum wg term to tilestart"))
             moduleLoadStridedBatch.add(SAddCU32(dst=sgpr(tileStart+1), src0=sgpr(tileStart+1), src1=sgpr(stmp+1), comment="accum wg term to tilestart"))
           wg+=1

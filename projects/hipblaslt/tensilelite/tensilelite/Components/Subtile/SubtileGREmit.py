@@ -25,7 +25,7 @@ from rocisa.code import Module
 from rocisa.container import DPPModifiers, EXEC, MUBUFModifiers, VCC, vgpr, sgpr, mgpr
 from rocisa.enum import RegisterType
 from rocisa.instruction import (
-    BufferLoadB128,
+    BufferLoadB128, BufferLoadB32, SWaitCnt,
     SAddCU32, SAddU32, SAddU64, SAndB32, SMaxI32, SMinU32, SMovB32, SMovB64, SMulI32,
     SNop, SOrB32, SSubI32, SXorB32,
     SCBranchSCC1, SCmpEQU32, SCSelectB32, SEndpgm,
@@ -33,7 +33,7 @@ from rocisa.instruction import (
     VAddU32, VAndB32, VCmpLtI32, VCmpXEqU32, VCndMaskB32,
     VLShiftLeftB32, VLShiftRightB32, VMovB32, VOrB32,
     TensorLoadToLds,
-    VMulLOU32, VReadfirstlaneB32, VSubU32, VXorB32,
+    VMulHIU32, VMulLOU32, VReadfirstlaneB32, VSubU32, VXorB32,
 )
 
 from .SubtileGeometry import (
@@ -177,8 +177,10 @@ def _allocGROffsetRegs_TLU0(tag, tile, ti, writer, kernel):
   tmpSgprBuffer = 3
   sgprLimit = writer.states.regCaps["MaxSgpr"] - tmpSgprBuffer
 
+  # A gathered operand has no common row stride, so every row group keeps its own VGPRs.
+  gather = _isMoEGather(kernel, ti)
   for reg_idx in range(perpDimSize):
-    useSgpr = writer.sgprPool.size() < sgprLimit
+    useSgpr = writer.sgprPool.size() < sgprLimit and not gather
     if useSgpr:
       rl = RegList(writer.sgprPool, RegisterType.Sgpr)
     else:
@@ -598,6 +600,95 @@ def _grComputeAllOffsets_legacy(module, writer, tileInfo, colId, rowId, rowOffse
     _grComputeOffset_legacy(module, writer, tileInfo, rotatedcolId, rowOffset, tileInfo.sharedVgprGROffset[i])
     writer.vgprPool.checkIn(rotatedcolId)
 
+def _isMoEGather(kernel, tileInfo):
+  return kernel["ProblemType"]["MoESortedLayout"] == 2 and tileInfo.tc == 'B'
+
+
+def _grComputeAllOffsetsMoEGather(module, writer, tileInfo, colId, rowId, rowOffset):
+  """GR offsets for a B tile whose rows are gathered through sorted_ids.
+
+  Same lane-to-(row, col) assignment as _grComputeAllOffsets_legacy plus
+  _grComputeSubtileOffsets_legacy, but every offset is
+  colBytes + bRow(row) * strideB * bpe with
+  bRow = (sorted_ids[row] & 0xFFFFFF) / divisor, so each row group gets its own
+  VGPRs. The division is mulhi by moeRowDivMagicSgpr (0 for divisor 1).
+  moeSortedIdsSgpr points at the tile's first sorted row; SrdB starts at B itself
+  (computeLoadSrd).
+  """
+  tc = tileInfo.tc
+  bpeBits = int(8*tileInfo.bpe)
+  loadWidth = tileInfo.loadWidthGR
+  subtileSize = tileInfo.subtileShape[0] * tileInfo.mmaTileShape[0]
+  grRowStep = math.ceil(subtileSize * tileInfo.loadRatioGR)
+  groupRowStep = math.ceil(tileInfo.numGRPerSubtile * tileInfo.loadRatioGR * subtileSize)
+  numGR = len(tileInfo.sharedVgprGROffset)
+
+  def outReg(gr, group):
+    if group == 0:
+      return tileInfo.sharedVgprGROffset[gr]
+    return tileInfo.localSubtilesRegister[group].indices[gr]
+
+  numGroups = len(tileInfo.localSubtilesRegister)
+  with writer.allocTmpSgpr(4, 4, tag="moeGather_srd") as srdRes:
+    srd = srdRes.idx
+    sids = writer.states.moeSortedIdsSgpr
+    module.addComment0("MoE gather: SRD over this tile's sorted_ids")
+    module.add(SMovB64(dst=sgpr(srd, 2), src=sgpr(sids, 2), comment="sorted_ids of the tile's first row"))
+    module.add(SMovB32(dst=sgpr(srd+2), src=hex(writer.states.kernel["MacroTile1"] * 4), comment="MT1 rows * 4 bytes"))
+    module.add(SMovB32(dst=sgpr(srd+3), src="Srd127_96", comment="Set bits 127_96 in SRD"))
+    rowBytes = writer.vgprPool.checkOut(1, tag="moeGather_rowBytes")
+    module.add(VAddU32(dst=vgpr(rowOffset), src0=vgpr(rowId), src1=vgpr(rowOffset), comment="%s: row offset"%tc))
+    for gr in range(numGR):
+      if gr > 0:
+        module.add(VAddU32(dst=vgpr(rowOffset), src0=grRowStep, src1=vgpr(rowOffset), comment="%s: advance row for GR offset %u"%(tc, gr)))
+      for group in range(numGroups):
+        module.add(VAddU32(dst=vgpr(rowBytes), src0=group * groupRowStep, src1=vgpr(rowOffset), comment="%s: row of GR %u, row group %u"%(tc, gr, group)))
+        module.add(VLShiftLeftB32(dst=vgpr(rowBytes), shiftHex=hex(2), src=vgpr(rowBytes), comment="row * 4 bytes"))
+        module.add(BufferLoadB32(dst=vgpr(outReg(gr, group)), vaddr=vgpr(rowBytes), saddr=sgpr(srd, 4), soffset=0,
+                                 mubuf=MUBUFModifiers(offen=True), comment="sorted_ids[row]"))
+    writer.vgprPool.checkIn(rowBytes)
+  module.add(SWaitCnt(vlcnt=0, comment="wait for sorted_ids"))
+
+  for gr in range(numGR):
+    for group in range(numGroups):
+      out = outReg(gr, group)
+      module.add(VAndB32(dst=vgpr(out), src0=hex(0xFFFFFF), src1=vgpr(out), comment="%s: id = sorted_id & 0xFFFFFF"%tc))
+  noDivLabel = Label(writer.labels.getNameInc("MoE_GatherNoDiv"), "")
+  module.add(SCmpEQU32(src0=sgpr(writer.states.moeRowDivMagicSgpr), src1=0, comment="divisor 1?"))
+  module.add(SCBranchSCC1(labelName=noDivLabel.getLabelName()))
+  for gr in range(numGR):
+    for group in range(numGroups):
+      out = outReg(gr, group)
+      module.add(VMulHIU32(dst=vgpr(out), src0=vgpr(out), src1=sgpr(writer.states.moeRowDivMagicSgpr), comment="%s: B row = id / divisor"%tc))
+  module.add(noDivLabel)
+
+  tmpVgpr = writer.vgprPool.checkOut(2, tag="moeGather_tmpVgpr")
+  colBytes, rotatedColId = tmpVgpr, tmpVgpr + 1
+  for gr in range(numGR):
+    # Column rotation per GR offset, as in _grComputeAllOffsets_legacy
+    if gr > 0 and tileInfo.loadRatioGR == 0.5:
+      if tileInfo.bpe == 1:
+        module.add(VAndB32(dst=vgpr(colBytes), src0=vgpr(colId), src1=hex(4), comment="%s: block_bit = colId & 4"%tc))
+        module.add(VAndB32(dst=vgpr(rotatedColId), src0=vgpr(colId), src1=hex(3), comment="%s: K_group = colId & 3"%tc))
+        module.add(VAddU32(dst=vgpr(rotatedColId), src0=vgpr(rotatedColId), src1=hex(2), comment="%s: K_group + 2"%tc))
+        module.add(VAndB32(dst=vgpr(rotatedColId), src0=vgpr(rotatedColId), src1=hex(3), comment="%s: (K_group+2) %% 4"%tc))
+        module.add(VAddU32(dst=vgpr(rotatedColId), src0=vgpr(rotatedColId), src1=vgpr(colBytes), comment="%s: K_group_rot + block_bit"%tc))
+      else:
+        blockSize = tileInfo.subIterKBytes // loadWidth
+        module.add(VAddU32(dst=vgpr(rotatedColId), src0=blockSize // 2, src1=vgpr(colId), comment="%s: rotate col for GR offset %u"%(tc, gr)))
+        module.add(VAndB32(dst=vgpr(rotatedColId), src0=vgpr(rotatedColId), src1=hex(blockSize-1), comment="(col + %d) %% block_size"%(blockSize // 2)))
+    else:
+      module.add(VMovB32(dst=vgpr(rotatedColId), src=vgpr(colId), comment=""))
+    module.add(VLShiftLeftB32(dst=vgpr(colBytes), shiftHex=hex(loadWidth.bit_length()-1), src=vgpr(rotatedColId), comment="scale col_id by load_width"))
+    for group in range(numGroups):
+      out = outReg(gr, group)
+      module.add(VMulLOU32(dst=vgpr(out), src0=sgpr("StrideB1J"), src1=vgpr(out), comment="%s: B row * stride"%tc))
+      module.add(VLShiftLeftB32(dst=vgpr(out), shiftHex=hex(bpeBits.bit_length()-1), src=vgpr(out), comment="%s: B row*stride*bpe"%tc))
+      module.add(VLShiftRightB32(dst=vgpr(out), shiftHex=hex(3), src=vgpr(out), comment="to bytes"))
+      module.add(VAddU32(dst=vgpr(out), src0=vgpr(colBytes), src1=vgpr(out), comment="%s: GR gathered row_offset"%tc))
+  writer.vgprPool.checkIn(tmpVgpr)
+
+
 def _grSwizzleColIds(module, writer, pairs, blockSize, numRowsPerLDSBanks,
                      laneId, waveId):
   """Row-major GR colId swizzle for the tensors sharing this layout.
@@ -691,6 +782,8 @@ def _graTileAssignment_legacy(writer, kernel, useSwizzling=True):
   tileInfoB = writer.states.b.tileInfo
   aTLU1 = _isGRTLU1(tileInfoA)
   bTLU1 = _isGRTLU1(tileInfoB)
+  assert not (_isMoEGather(kernel, tileInfoB) and (aTLU1 or bTLU1)), \
+    "MoE B row gather supports the TN (TLU=0) subtile path only"
   # TLU=1 (NT / free-dim contiguous): each lane's 128-bit buffer_load grabs a
   # full free-dim strip (M for A, N for B) at one K row; lanes walk K. Offset
   # addressing is a pure K-stride ramp, so it does not use the row-major
@@ -734,10 +827,15 @@ def _graTileAssignment_legacy(writer, kernel, useSwizzling=True):
   _grComputeRowPartition_legacy(module, kernel, writer, tileInfoA, waveId, rowOffsetA)
   _grComputeRowPartition_legacy(module, kernel, writer, tileInfoB, waveId, rowOffsetB)
   _grComputeAllOffsets_legacy(module, writer, tileInfoA, colIdA, rowId, rowOffsetA)
-  _grComputeAllOffsets_legacy(module, writer, tileInfoB, colIdB, rowId, rowOffsetB)
+  gatherB = _isMoEGather(kernel, tileInfoB)
+  if gatherB:
+    _grComputeAllOffsetsMoEGather(module, writer, tileInfoB, colIdB, rowId, rowOffsetB)
+  else:
+    _grComputeAllOffsets_legacy(module, writer, tileInfoB, colIdB, rowId, rowOffsetB)
   writer.vgprPool.checkIn(tmpVgpr)
   _grComputeSubtileOffsets_legacy(writer, module, tileInfoA)
-  _grComputeSubtileOffsets_legacy(writer, module, tileInfoB)
+  if not gatherB:
+    _grComputeSubtileOffsets_legacy(writer, module, tileInfoB)
   return module
 
 

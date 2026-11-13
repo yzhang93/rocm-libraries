@@ -1368,6 +1368,7 @@ namespace TensileLite
             bool swizzleTensorA             = false;
             bool swizzleTensorB             = false;
             bool fusedGemmA2A               = false;
+            int  moeSortedLayout            = 0;
             int  metadataLayout             = 0;
             // w4a16 group size, zero-point and encoding come from predicates and the problem;
             // a runtime-group kernel matches several group sizes.

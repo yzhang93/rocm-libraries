@@ -380,6 +380,12 @@ class StateValues:
   batchOffsetCKernArgOffset: int         = 0
   batchOffsetAKernArgOffset: int         = 0
   batchOffsetBKernArgOffset: int         = 0
+  # MoESortedLayout: kernarg offset of the MoE pointers, and the prologue SGPRs
+  # holding the tile's expert, its sorted_ids address and the row divisor's magic
+  moeKernArgBase: int                    = 0
+  moeExpertSgpr: int                     = -1
+  moeSortedIdsSgpr: int                  = -1
+  moeRowDivMagicSgpr: int                = -1
   numSgprAlpha: int                      = 0 # For user arguments
   numSgprBeta: int                       = 0 # For user arguments
   numStoreSgprNames: List[str]           = field(init=False) # For post-loop kernel args
@@ -5392,6 +5398,7 @@ class KernelWriter(PersistentKernelState, StreamKKernelState, metaclass=abc.ABCM
     module.addComment0("Number of subtiles for B: %u"%(len(btileInfo.localSubtiles)))
 
     module.add(self.setupNewTile(kernel, tensorParametersA, tensorParametersB, isOptNLL=False))
+    module.add(self.moeSetup(kernel))
 
     # Subtile defers TDM descriptor SGPR allocation until after setupNewTile
     # (which includes StreamK preLoop + graWorkGroup) so freed SK-constant
@@ -5440,6 +5447,8 @@ class KernelWriter(PersistentKernelState, StreamKKernelState, metaclass=abc.ABCM
       if kernel["ProblemType"]["MXBlockB"]:
         module.addComment1("global read addresses: addresses mxsb")
         module.add(self.graAddresses(kernel, tensorParametersB["MX"]))
+    if kernel["ProblemType"]["MoESortedLayout"]:
+      self.sgprPool.checkIn(self.states.moeExpertSgpr)
 
 
     # List of tiles that need to be read form
@@ -5473,6 +5482,9 @@ class KernelWriter(PersistentKernelState, StreamKKernelState, metaclass=abc.ABCM
       module.add(initTDMDescriptorSubtile(self, kernel, tensorParametersB))
     if not hasTDM:
       module.add(graTileAssignment(self, kernel))
+    if kernel["ProblemType"]["MoESortedLayout"] == 2:
+      self.sgprPool.checkIn(self.states.moeSortedIdsSgpr)
+      self.sgprPool.checkIn(self.states.moeRowDivMagicSgpr)
     module.add(lraTileAssignment(self, kernel))
     module.add(localReadDTLInitCommonSwapVgpr(self, kernel))
 

@@ -253,6 +253,10 @@ rocblaslt_status rocblaslt_matmul_impl(const rocblaslt_handle       handle,
                                         effective_uniform_summation_order(handle, matmul_descr)};
     problem.streamKFlags  = streamKFlags;
     problem.int4EncodingA = matmul_descr->int4_encoding_a_ext;
+    problem.moeSortedExpertIds = matmul_descr->moeSortedExpertIds;
+    problem.moeNumValidIds     = matmul_descr->moeNumValidIds;
+    problem.moeSortedIds       = matmul_descr->moeSortedIds;
+    problem.moeSortedIdsDivisor = matmul_descr->moeSortedIdsDivisor;
 
 #if HIPBLASLT_HAS_GEMM_A2A_FUSION
     problem.fused_epilogue      = matmul_descr->fused_epilogue;
@@ -467,6 +471,10 @@ rocblaslt_status rocblaslt_gemm_create_cpp_impl(const rocblaslt_handle          
                                         effective_sm_count_target(handle, matmul_descr, nullptr),
                                         effective_uniform_summation_order(handle, matmul_descr)};
     problem.int4EncodingA = matmul_descr->int4_encoding_a_ext;
+    problem.moeSortedExpertIds = matmul_descr->moeSortedExpertIds;
+    problem.moeNumValidIds     = matmul_descr->moeNumValidIds;
+    problem.moeSortedIds       = matmul_descr->moeSortedIds;
+    problem.moeSortedIdsDivisor = matmul_descr->moeSortedIdsDivisor;
 
 #if HIPBLASLT_HAS_GEMM_A2A_FUSION
     problem.fused_epilogue = matmul_descr->fused_epilogue;

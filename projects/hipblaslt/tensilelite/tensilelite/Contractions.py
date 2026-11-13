@@ -107,7 +107,7 @@ class ProblemType:
                  'highPrecisionAccumulate', 'useInitialStridesAB', 'useInitialStridesCD', 'stridedBatched', 'groupedGemm',
                  'useGradient', 'activationType', 'activationArgLength', 'activationComputeDataType', 'activationNoGuard',
                  'sparse', 'f32XdlMathOp', 'supportDeviceUserArguments', 'outputAmaxD', 'swizzleTensorA', 'swizzleTensorB', 'metadataLayout',
-                 'mxBlockA', 'mxBlockB', 'mxTypeA', 'mxTypeB', 'mxScaleFormat', 'fusedGemmA2A']
+                 'mxBlockA', 'mxBlockB', 'mxTypeA', 'mxTypeB', 'mxScaleFormat', 'fusedGemmA2A', 'moeSortedLayout']
     @classmethod
     def FromOriginalState(cls, d):
         indices = [None]*d['TotalIndices']
@@ -346,6 +346,7 @@ class ProblemType:
         rv.swizzleTensorB = d.get('SwizzleTensorB', False)
 
         rv.fusedGemmA2A = d.get('FusedGemmA2A', False)
+        rv.moeSortedLayout = d.get('MoESortedLayout', 0)
 
         rv.mxBlockA = d.get('MXBlockA', 0)
         rv.mxBlockB = d.get('MXBlockB', 0)
@@ -490,6 +491,9 @@ class ProblemType:
             predicates.append(ProblemPredicate("SwizzleTensorB", value=self.swizzleTensorB))
             predicates.append(ProblemPredicate("FusedGemmA2A", value=self.fusedGemmA2A))
             if self.fusedGemmA2A and self.batched:
+                predicates.append(ProblemPredicate("BatchSizeEqual", index=0, value=1))
+            predicates.append(ProblemPredicate("MoESortedLayout", value=self.moeSortedLayout))
+            if self.moeSortedLayout and self.batched:
                 predicates.append(ProblemPredicate("BatchSizeEqual", index=0, value=1))
             predicates.append(ProblemPredicate("MXBlockA", value=self.mxBlockA))
             if self.mxBlockA:

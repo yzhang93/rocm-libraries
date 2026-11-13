@@ -508,6 +508,15 @@ _defaultProblemType = {
     # PUSHes the first AM feature columns to remote peer recv slots from the
     # GEMM epilogue; the remaining columns store locally.
     "FusedGemmA2A": False,
+    # MoE expert GEMM on a sorted token layout (as from aiter moe_sorting or vLLM
+    # moe_align_block_size): the N dimension is the sorted, block-padded token rows, one
+    # block per MacroTile1.
+    #   0: off
+    #   1: A and its MX scales come from expert sorted_expert_ids[wg1] (the batch stride is
+    #      the expert stride); blocks at or past num_valid_ids or with a negative expert exit
+    #   2: as 1, and B rows are gathered from (sorted_ids[row] & 0xFFFFFF) / divisor (rows
+    #      past the B tensor, such as a padding id, read zeros)
+    "MoESortedLayout": 0,
     # For kernels putting arguments in workspaces instead of kernel arguments, they can choose to support user arguments input instead.
     "SupportUserArgs": True,
     "SwizzleTensorA": False,
@@ -1367,6 +1376,8 @@ class ProblemType(Mapping):
       name.append("AmaxD")
     if self["FusedGemmA2A"]:
       name.append("FusedA2A")
+    if self["MoESortedLayout"]:
+      name.append("MoE%u" % self["MoESortedLayout"])
     if self["Sparse"]:
       if self["Sparse"] == 2:
         name.append("SPBML%d"%(self["MetadataLayout"]))

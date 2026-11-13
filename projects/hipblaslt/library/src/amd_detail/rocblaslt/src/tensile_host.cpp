@@ -2354,6 +2354,7 @@ namespace
 
         // set AmaxD
         tensileProblem.setOutputAmaxD(prob.amaxD != nullptr);
+        tensileProblem.setMoESortedLayout(prob.moeSortedLayout());
         tensileProblem.setAmaxD(compute_type, true);
 
         if(prob.compute_type == rocblaslt_compute_f32_fast_xf32)
@@ -2661,6 +2662,7 @@ namespace
 
         // set AmaxD
         tensileProblem.setOutputAmaxD(prob.amaxD != nullptr);
+        tensileProblem.setMoESortedLayout(prob.moeSortedLayout());
         tensileProblem.setAmaxD(compute_type, true);
 
         if(prob.compute_type == rocblaslt_compute_f32_fast_xf32)
@@ -2816,6 +2818,10 @@ namespace
         inputs.scaleD        = reinterpret_cast<const void*>(prob.scaleD);
         inputs.scaleAlphaVec = reinterpret_cast<const void*>(prob.scaleAlphaVec);
         inputs.amaxD         = reinterpret_cast<void*>(prob.amaxD);
+        inputs.moeSortedExpertIds = prob.moeSortedExpertIds;
+        inputs.moeNumValidIds     = prob.moeNumValidIds;
+        inputs.moeSortedIds       = prob.moeSortedIds;
+        inputs.moeSortedIdsDivisor = static_cast<uint32_t>(prob.moeSortedIdsDivisor);
 
         static const std::map<rocisa::DataType, TensileLite::ConstantVariant> argument_vals = {
             {rocisa::DataType::Float, 0.0f},
@@ -3818,6 +3824,10 @@ bool useRocRoller(rocblaslt_handle handle, const RocblasltContractionProblem& pr
     bool isFp8A = (prob.a_type == static_cast<hipDataType>(HIP_R_8F_E4M3));
     bool isFp8B = (prob.b_type == static_cast<hipDataType>(HIP_R_8F_E4M3));
     if(isFp8A && isFp8B && isShuffledScale)
+        return false;
+
+    // rocRoller has no MoE sorted-layout kernels
+    if(prob.moeSortedLayout())
         return false;
 
     return handle->useRocRoller == 1

@@ -2302,6 +2302,20 @@ class Solution(collections.abc.Mapping):
         return
       state["InternalSupportParams"]["SupportUserGSU"] = False # Disable UserGSU for the last-WG election
 
+    if state["ProblemType"]["MoESortedLayout"]:
+      # One N tile is one moe_sorting block whose expert picks A, so the tile may not
+      # be split or remapped across problems.
+      if state["ProblemType"]["GroupedGemm"] or not state["ProblemType"]["Batched"]:
+        reject(state, printRejectionReason, "MoESortedLayout requires a batched, non-grouped problem")
+        return
+      if isPersistent(state) or state["GlobalSplitU"] != 1:
+        reject(state, printRejectionReason, "MoESortedLayout requires GlobalSplitU=1 and no persistent tiling")
+        return
+      if state["ProblemType"]["TLUA"] or state["ProblemType"]["TLUB"]:
+        reject(state, printRejectionReason, "MoESortedLayout supports TN (TLUA=TLUB=False) only")
+        return
+      state["InternalSupportParams"]["SupportUserGSU"] = False
+
     if state["GlobalSplitU"] == 0 and state["AdaptiveGemmGSUA"] == 1:
       reject(state, printRejectionReason, "AdaptiveGemmGSUA requires GSU enablement")
       return

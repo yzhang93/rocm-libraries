@@ -2912,6 +2912,39 @@ namespace TensileLite
                 }
             };
 
+            struct MoESortedLayout : public Predicate_CRTP<MoESortedLayout, ContractionProblemGemm>
+            {
+                enum
+                {
+                    HasIndex = false,
+                    HasValue = true
+                };
+                int value = 0;
+
+                MoESortedLayout() = default;
+                MoESortedLayout(int value)
+                    : value(value)
+                {
+                }
+
+                static std::string Type()
+                {
+                    return "MoESortedLayout";
+                }
+
+                bool operator()(ContractionProblemGemm const& problem) const override
+                {
+                    return problem.moeSortedLayout() == value;
+                }
+
+                bool debugEval(ContractionProblemGemm const& problem,
+                               std::ostream&                 stream) const override
+                {
+                    return debugEvalCmp(
+                        problem, stream, "prob", problem.moeSortedLayout(), "==", "sol", value);
+                }
+            };
+
             // value is the solution's MacroTile0.
             struct FusedA2ATileDivisible
                 : public Predicate_CRTP<FusedA2ATileDivisible, ContractionProblemGemm>

@@ -843,6 +843,11 @@ RocblasltContractionProblem construct_rocblaslt_problem(rocblaslt_handle        
 
     // Encoding is a solution predicate; set it on every search path.
     problem.int4EncodingA = matmul_descr->int4_encoding_a_ext;
+    // So is the MoE sorted layout.
+    problem.moeSortedExpertIds = matmul_descr->moeSortedExpertIds;
+    problem.moeNumValidIds     = matmul_descr->moeNumValidIds;
+    problem.moeSortedIds       = matmul_descr->moeSortedIds;
+    problem.moeSortedIdsDivisor = matmul_descr->moeSortedIdsDivisor;
 
     if(scaleAlphaVec)
     {
@@ -1933,6 +1938,42 @@ rocblaslt_status rocblaslt_matmul_desc_set_attribute(rocblaslt_matmul_desc      
                     return rocblaslt_status_invalid_value;
                 }
                 break;
+            case ROCBLASLT_MATMUL_DESC_MOE_SORTED_EXPERT_IDS_POINTER_EXT:
+            case ROCBLASLT_MATMUL_DESC_MOE_NUM_VALID_IDS_POINTER_EXT:
+            case ROCBLASLT_MATMUL_DESC_MOE_SORTED_IDS_POINTER_EXT:
+            {
+                if(sizeInBytes < sizeof(void*))
+                {
+                    log_error(__func__, "invalid MoE pointer buf size", sizeInBytes);
+                    return rocblaslt_status_invalid_value;
+                }
+                const void** field
+                    = matmulAttr == ROCBLASLT_MATMUL_DESC_MOE_SORTED_EXPERT_IDS_POINTER_EXT
+                          ? &matmulDesc->moeSortedExpertIds
+                      : matmulAttr == ROCBLASLT_MATMUL_DESC_MOE_NUM_VALID_IDS_POINTER_EXT
+                          ? &matmulDesc->moeNumValidIds
+                          : &matmulDesc->moeSortedIds;
+                memcpy(field, buf, sizeof(void*));
+                break;
+            }
+            case ROCBLASLT_MATMUL_DESC_MOE_SORTED_IDS_DIVISOR_EXT:
+            {
+                int32_t divisor = 0;
+                if(sizeInBytes < sizeof(int32_t))
+                {
+                    log_error(__func__, "invalid MoE divisor buf size", sizeInBytes);
+                    return rocblaslt_status_invalid_value;
+                }
+                memcpy(&divisor, buf, sizeof(int32_t));
+                // The kernel divides by a 32-bit magic multiplier, exact for divisors below 256.
+                if(divisor < 1 || divisor > 255)
+                {
+                    log_error(__func__, "MoE sorted-ids divisor must be in [1, 255]", divisor);
+                    return rocblaslt_status_invalid_value;
+                }
+                matmulDesc->moeSortedIdsDivisor = divisor;
+                break;
+            }
             case ROCBLASLT_MATMUL_DESC_EPILOGUE_AUX_DATA_TYPE:
                 if(sizeof(int32_t) <= sizeInBytes)
                     memcpy(&matmulDesc->aux_type, buf, sizeof(int32_t));
@@ -2444,6 +2485,34 @@ rocblaslt_status rocblaslt_matmul_desc_get_attribute(rocblaslt_matmul_desc      
                     return rocblaslt_status_invalid_value;
                 }
                 memcpy(buf, &matmulDesc->amaxD, sizeof(void*));
+                break;
+            case ROCBLASLT_MATMUL_DESC_MOE_SORTED_EXPERT_IDS_POINTER_EXT:
+            case ROCBLASLT_MATMUL_DESC_MOE_NUM_VALID_IDS_POINTER_EXT:
+            case ROCBLASLT_MATMUL_DESC_MOE_SORTED_IDS_POINTER_EXT:
+                if(sizeWritten)
+                    *sizeWritten = sizeof(void*);
+                if(sizeInBytes < sizeof(void*))
+                {
+                    log_error(__func__, "invalid buf size", sizeInBytes);
+                    return rocblaslt_status_invalid_value;
+                }
+                memcpy(buf,
+                       matmulAttr == ROCBLASLT_MATMUL_DESC_MOE_SORTED_EXPERT_IDS_POINTER_EXT
+                           ? &matmulDesc->moeSortedExpertIds
+                       : matmulAttr == ROCBLASLT_MATMUL_DESC_MOE_NUM_VALID_IDS_POINTER_EXT
+                           ? &matmulDesc->moeNumValidIds
+                           : &matmulDesc->moeSortedIds,
+                       sizeof(void*));
+                break;
+            case ROCBLASLT_MATMUL_DESC_MOE_SORTED_IDS_DIVISOR_EXT:
+                if(sizeWritten)
+                    *sizeWritten = sizeof(int32_t);
+                if(sizeInBytes < sizeof(int32_t))
+                {
+                    log_error(__func__, "invalid buf size", sizeInBytes);
+                    return rocblaslt_status_invalid_value;
+                }
+                memcpy(buf, &matmulDesc->moeSortedIdsDivisor, sizeof(int32_t));
                 break;
             case ROCBLASLT_MATMUL_DESC_EPILOGUE_AUX_DATA_TYPE:
                 if(sizeWritten)

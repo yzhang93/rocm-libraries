@@ -462,6 +462,16 @@ class SignatureDefault(Signature):
             signature.addArg("batchOffsetB", SVK.SIG_VALUE, "u64")
             userArgumentsInfo.gemmArgumentSize += 32  # 4 offsets * 8 bytes each
 
+        # MoE sorted-layout pointers follow the batch offsets, in the host's order.
+        # moeKernArgBase is relative to KernArgAddress after the common-args shift.
+        if kernel["ProblemType"]["MoESortedLayout"]:
+            writer.states.moeKernArgBase = signature.offset - userArgumentsInfo.commonArgsSize
+            signature.addArg("moeSortedExpertIds", SVK.SIG_GLOBALBUFFER, "u32", "generic")
+            signature.addArg("moeNumValidIds", SVK.SIG_GLOBALBUFFER, "u32", "generic")
+            if kernel["ProblemType"]["MoESortedLayout"] == 2:
+                signature.addArg("moeSortedIds", SVK.SIG_GLOBALBUFFER, "u32", "generic")
+                signature.addArg("moeRowDivMagic", SVK.SIG_VALUE, "u32")
+
         # Fused GEMM.A2A kernarg metadata; registered LAST so it lands at the
         # tail. See fusedA2AKernArgLayout() for the offset contract.
         if kernel["ProblemType"]["FusedGemmA2A"]:

@@ -407,6 +407,10 @@ typedef enum rocblaslt_matmul_desc_attributes_
     ROCBLASLT_MATMUL_DESC_FUSED_EPILOGUE                 = 106,
 #endif
     ROCBLASLT_MATMUL_DESC_A_INT4_ENCODING_EXT            = 107,
+    ROCBLASLT_MATMUL_DESC_MOE_SORTED_EXPERT_IDS_POINTER_EXT = 108,
+    ROCBLASLT_MATMUL_DESC_MOE_NUM_VALID_IDS_POINTER_EXT  = 109,
+    ROCBLASLT_MATMUL_DESC_MOE_SORTED_IDS_POINTER_EXT     = 110,
+    ROCBLASLT_MATMUL_DESC_MOE_SORTED_IDS_DIVISOR_EXT     = 111,
     ROCBLASLT_MATMUL_DESC_MAX,
 } rocblaslt_matmul_desc_attributes;
 
@@ -646,6 +650,17 @@ struct RocblasltContractionProblem
     // 1 = on. Forwarded into ContractionProblemParameters::setUniformSummationOrder
     // by tensile_host.cpp.
     int32_t uniform_summation_order = 0;
+
+    // HIPBLASLT_MATMUL_DESC_MOE_*_POINTER_EXT. Set after construction, like streamKFlags.
+    const void* moeSortedExpertIds = nullptr;
+    const void* moeNumValidIds     = nullptr;
+    const void* moeSortedIds       = nullptr;
+    int32_t     moeSortedIdsDivisor = 1;
+    // 0: not an MoE GEMM, 1: expert per N block, 2: also gather B rows
+    int moeSortedLayout() const
+    {
+        return moeSortedExpertIds ? (moeSortedIds ? 2 : 1) : 0;
+    }
 
 #if HIPBLASLT_HAS_GEMM_A2A_FUSION
     // The four below are set post-construction, not through the constructor.

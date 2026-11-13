@@ -1329,6 +1329,16 @@ namespace TensileLite
             m_fusedA2AWorld = world;
         }
 
+        int moeSortedLayout() const
+        {
+            return m_moeSortedLayout;
+        }
+
+        void setMoESortedLayout(int mode)
+        {
+            m_moeSortedLayout = mode;
+        }
+
         size_t mxBlockA() const
         {
             return m_mxBlockA;
@@ -1600,6 +1610,7 @@ namespace TensileLite
         bool             m_fusedGemmA2A            = false;
         int64_t          m_fusedA2AExtent          = 0;
         uint32_t         m_fusedA2AWorld           = 0;
+        int              m_moeSortedLayout         = 0;
         int              m_useBias                 = 0;
         bool             m_useGateResidual         = false;
         rocisa::DataType m_gateType               = rocisa::DataType::None;
@@ -1765,6 +1776,12 @@ namespace TensileLite
         int64_t batchOffsetB = 0;
         int64_t batchOffsetC = 0;
         int64_t batchOffsetD = 0;
+
+        // MoE sorted token layout (aiter moe_sorting outputs, int32 device arrays)
+        void const* moeSortedExpertIds = nullptr; // one expert id per MacroTile1 rows
+        void const* moeNumValidIds     = nullptr; // number of valid sorted rows
+        void const* moeSortedIds       = nullptr; // B row id (low 24 bits) per sorted row
+        uint32_t    moeSortedIdsDivisor = 1;      // B row = (sorted id & 0xFFFFFF) / divisor
 
         // Constants
         ConstantVariant              alpha = static_cast<float>(0);
