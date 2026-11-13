@@ -12,6 +12,9 @@ Arms, all with MXFP4 weights and MXFP8 activations:
              gemm2     MoESortedLayout 1: expert per block, B read in sorted order
              combine   top-k weighted sum back to token order
 Compared with moe_glue_bench.py's hb_aiter arm, the gather and group-setup stages are gone.
+layout="vllm" sorts with vLLM's moe_align_block_size instead (ids = token * topk + slot,
+padding = T * topk); GEMM1 then divides the ids by topk, and the ids are converted to aiter's
+format only for aiter's quantization kernel.
 Run with GG_SHIM=libgg_shim_moe.so (links hipblaslt-moe)."""
 
 import argparse
@@ -48,18 +51,18 @@ class MoEShim(mb.Shim):
         super().__init__()
         L = self.lib
         vp, i64, u64 = ctypes.c_void_p, ctypes.c_int64, ctypes.c_uint64
-        L.moe_create.argtypes = [ctypes.POINTER(vp), i64, i64, i64, i64, i64, vp, vp, vp, u64]
+        L.moe_create.argtypes = [ctypes.POINTER(vp), i64, i64, i64, i64, i64, vp, vp, vp, ctypes.c_int32, u64]
         L.moe_create.restype = ctypes.c_int
         L.moe_run.argtypes = [vp, vp, vp, vp, vp, vp, vp, vp, vp, vp, u64, vp]
         L.moe_run.restype = ctypes.c_int
 
-    def moe_create(self, match, M, K, P, rowsB, aStride, seids, nvalid, sids, ws_bytes):
+    def moe_create(self, match, M, K, P, rowsB, aStride, seids, nvalid, sids, ws_bytes, divisor=1):
         os.environ["GG_KERNEL_MATCH"] = match
         try:
             p = ctypes.c_void_p()
             r = self.lib.moe_create(ctypes.byref(p), M, K, P, rowsB, aStride, seids.data_ptr(),
                                     nvalid.data_ptr(), sids.data_ptr() if sids is not None else None,
-                                    ws_bytes)
+                                    divisor, ws_bytes)
         finally:
             del os.environ["GG_KERNEL_MATCH"]
         if r != 0:
@@ -80,9 +83,9 @@ class HipblasltMoESorted:
 
     WS_BYTES = 64 << 20
 
-    def __init__(self, shim, w, T):
-        assert w.fp4
-        self.shim, self.w, self.T = shim, w, T
+    def __init__(self, shim, w, T, layout="aiter"):
+        assert w.fp4 and layout in ("aiter", "vllm")
+        self.shim, self.w, self.T, self.layout = shim, w, T, layout
         self.TK = TK = T * TOPK
         m1, m2, self.blk = kernels(T)
         blk = self.blk
@@ -95,17 +98,27 @@ class HipblasltMoESorted:
         self.o2 = z(P, H, dt=torch.bfloat16)
         self.ws = z(self.WS_BYTES, dt=torch.uint8)
         ids = z(P + 1, dt=torch.int32)  # stands in for the sort outputs during selection
-        self.plan1, self.k1 = shim.moe_create(m1, 2 * I, H, P, T, 2 * I * H, ids, ids, ids, self.WS_BYTES)
+        self.plan1, self.k1 = shim.moe_create(m1, 2 * I, H, P, T, 2 * I * H, ids, ids, ids, self.WS_BYTES,
+                                              divisor=TOPK if layout == "vllm" else 1)
         self.plan2, self.k2 = shim.moe_create(m2, H, I, P, 0, H * I, ids, ids, None, self.WS_BYTES)
 
     def forward(self, x, topk_ids, topk_w):
         w, T, P, blk = self.w, self.T, self.P, self.blk
+        TK = self.TK
         with Stage("sort"):
-            sids, sw, seids, nvalid, _ = moe_sorting(topk_ids, topk_w, E, H, torch.bfloat16, blk,
-                                                     dispatch_policy=2, accumulate=False)
-            sids, seids = sids[:P], seids[: P // blk]
+            if self.layout == "aiter":
+                sids, sw, seids, nvalid, _ = moe_sorting(topk_ids, topk_w, E, H, torch.bfloat16, blk,
+                                                         dispatch_policy=2, accumulate=False)
+                qids = sids = sids[:P]
+            else:
+                from vllm.model_executor.layers.fused_moe.moe_align_block_size import moe_align_block_size
+                sids, seids, nvalid = moe_align_block_size(topk_ids, blk, E, pad_sorted_ids=True)
+                sids = sids[:P]
+                # aiter's quantization reads aiter's id format: token, slot << 24, padding T.
+                qids = torch.where(sids < TK, ((sids % TOPK) << 24) | (sids // TOPK), T).to(torch.int32)
+            seids = seids[: P // blk]
         with Stage("quant"):
-            xq, xs = fused_dynamic_mx_quant_moe_sort(x, sids, nvalid, T, TOPK, blk, quant_dtype=dtypes.fp8)
+            xq, xs = fused_dynamic_mx_quant_moe_sort(x, qids, nvalid, T, TOPK, blk, quant_dtype=dtypes.fp8)
         self.shim.moe_run(self.plan1, w.h_w13, w.h_s13, xq, xs, self.h1, seids, nvalid, sids, self.ws)
         with Stage("act"):
             a2q, a2s = per_1x32_mx_quant_hip(act(self.h1), quant_dtype=dtypes.fp8,
@@ -115,8 +128,11 @@ class HipblasltMoESorted:
             # Each (token, slot) pair owns one sorted row; padding rows and rows past
             # num_valid_ids land on the dump entry TK.
             valid = self.ar_rows < nvalid[0]
-            tok = torch.where(valid, sids & 0xFFFFFF, T).long()
-            pair = torch.where(tok < T, tok * TOPK + (sids >> 24).long(), self.TK)
+            if self.layout == "aiter":
+                tok = torch.where(valid, sids & 0xFFFFFF, T).long()
+                pair = torch.where(tok < T, tok * TOPK + (sids >> 24).long(), TK)
+            else:
+                pair = torch.where(valid & (sids < TK), sids, TK).long()
             self.inv.scatter_(0, pair, self.ar_rows)
             o = self.o2.index_select(0, self.inv[: self.TK]).view(T, TOPK, H).float()
             return (o * topk_w[..., None]).sum(1).to(torch.bfloat16)
@@ -128,6 +144,7 @@ def main():
     ap.add_argument("--samples", type=int, default=16)
     ap.add_argument("--iters", type=int, default=20)
     ap.add_argument("--check-tokens", default="1,7,64,1000,4096")
+    ap.add_argument("--layouts", default="aiter,vllm", help="sorted layouts to check")
     ap.add_argument("--out", default=os.path.join(HERE, "results", "moe_sorted_bench.json"))
     args = ap.parse_args()
 
@@ -140,18 +157,19 @@ def main():
 
     for T in [int(t) for t in args.check_tokens.split(",") if t]:
         (x, ti, tw), = mb.make_inputs(T, 1, seed=1000 + T)
-        hb = HipblasltMoESorted(shim, w, T)
-        y = hb.forward(x, ti, tw)
         ref = w.reference(x, ti, tw, bf16_h=True)
         ref32 = w.reference(x, ti, tw)
         y_a = mb.aiter_forward(w, x, ti, tw)
-        torch.cuda.synchronize()
-        c = dict(T=T, block=hb.blk, rows=hb.P, kernel1=hb.k1, kernel2=hb.k2,
-                 vs_ref_bf16h=mb.rel_err(y, ref), vs_ref=mb.rel_err(y, ref32),
-                 aiter_vs_ref=mb.rel_err(y_a, ref32))
-        print("check", json.dumps({k: v for k, v in c.items() if not k.startswith("kernel")}), flush=True)
-        res["check"].append(c)
-        del hb
+        for layout in args.layouts.split(","):
+            hb = HipblasltMoESorted(shim, w, T, layout)
+            y = hb.forward(x, ti, tw)
+            torch.cuda.synchronize()
+            c = dict(T=T, layout=layout, block=hb.blk, rows=hb.P, kernel1=hb.k1, kernel2=hb.k2,
+                     vs_ref_bf16h=mb.rel_err(y, ref), vs_ref=mb.rel_err(y, ref32),
+                     aiter_vs_ref=mb.rel_err(y_a, ref32))
+            print("check", json.dumps({k: v for k, v in c.items() if not k.startswith("kernel")}), flush=True)
+            res["check"].append(c)
+            del hb
 
     bad = [c for c in res["check"] if not c["vs_ref_bf16h"] < 0.01]
     if bad:

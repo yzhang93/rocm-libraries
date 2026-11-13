@@ -23,6 +23,7 @@ namespace
     constexpr auto kMoeSortedExpertIds = static_cast<hipblasLtMatmulDescAttributes_t>(108);
     constexpr auto kMoeNumValidIds     = static_cast<hipblasLtMatmulDescAttributes_t>(109);
     constexpr auto kMoeSortedIds       = static_cast<hipblasLtMatmulDescAttributes_t>(110);
+    constexpr auto kMoeSortedIdsDiv    = static_cast<hipblasLtMatmulDescAttributes_t>(111);
 
     struct Plan
     {
@@ -180,7 +181,9 @@ const char* gg_kernel_name(void* plan)
 // non-grouped MXFP4 A x MXFP8 B TN GEMM over P sorted, block-padded rows,
 //   D[P, M] = B[rows, K] . A_e[M, K]^T   with e = sorted_expert_ids[row / MT1]
 // A holds all experts at aStride elements apart. rowsB > 0 gathers B rows through
-// sorted_ids (B has rowsB token rows); rowsB = 0 reads B in sorted order (P rows).
+// sorted_ids (B has rowsB token rows): row = (sorted_ids[r] & 0xFFFFFF) / divisor, with
+// divisor 1 for aiter's ids (token) and topk for vLLM's (token * topk + slot).
+// rowsB = 0 reads B in sorted order (P rows).
 // The MoE pointers set the heuristic's mode here and are reset on every run.
 int moe_create(void**      planOut,
                int64_t     M,
@@ -191,6 +194,7 @@ int moe_create(void**      planOut,
                const void* sortedExpertIds,
                const void* numValidIds,
                const void* sortedIds,
+               int32_t     divisor,
                uint64_t    wsBytes)
 {
     if(!g_handle)
@@ -225,8 +229,11 @@ int moe_create(void**      planOut,
     CHECK(hipblasLtMatmulDescSetAttribute(
         p->desc, kMoeNumValidIds, &numValidIds, sizeof(numValidIds)));
     if(rowsB > 0)
+    {
         CHECK(hipblasLtMatmulDescSetAttribute(
             p->desc, kMoeSortedIds, &sortedIds, sizeof(sortedIds)));
+        CHECK(hipblasLtMatmulDescSetAttribute(p->desc, kMoeSortedIdsDiv, &divisor, sizeof(divisor)));
+    }
 
     hipblasLtMatmulPreference_t pref = nullptr;
     CHECK(hipblasLtMatmulPreferenceCreate(&pref));
