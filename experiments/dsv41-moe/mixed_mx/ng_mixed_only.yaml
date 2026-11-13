@@ -1,0 +1,130 @@
+# Feasibility: grouped MX GEMM on gfx950 with the shipped grouped MXFP8 kernel's
+# settings (MT64x64x256, subtile, DTL, pre-swizzled scales), for
+#   P0 MXFP8 A x MXFP8 B (control, same as the shipped kernel)
+#   P1 MXFP4 A x MXFP8 B (DSv4.1 MoE: A = expert weights, B = token activations)
+#   P2 MXFP8 A x MXFP4 B
+# Sizes are [M, N, batch, K] for TN: GEMM1 1152x5120, GEMM2 5120x576, plus edges.
+GlobalParameters:
+  MinimumRequiredVersion: 5.0.0
+  NumElementsToValidate: -1
+  BoundsCheck: 0
+  KernelTime: True
+  SyncsPerBenchmark: 0
+  CpuThreads: 32
+  DataInitTypeA: 3
+  DataInitTypeB: 3
+  DataInitTypeC: 3
+  DataInitTypeD: 0
+  DataInitTypeMXSA: 3
+  DataInitTypeMXSB: 3
+  DataInitTypeAlpha: 1
+  DataInitTypeBeta: 0
+  PrintLevel: 1
+  PrintSolutionRejectionReason: True
+  ForceGenerateKernel: True
+  MaxWorkspaceSize: 134217728
+  MXScaleFormat: 1
+  Device: 0
+  LibraryFormat: msgpack
+
+BenchmarkProblems:
+  -
+    - # P1 MXFP4 A x MXFP8 B
+      OperationType: GEMM
+      DataType: F4
+      DataTypeB: F8
+      DestDataType: B
+      ComputeDataType: S
+      HighPrecisionAccumulate: True
+      TransposeA: True
+      TransposeB: False
+      UseBeta: True
+      Batched: True
+      SupportUserArgs: True
+      UseBias: 0
+      MXBlockA: 32
+      MXBlockB: 32
+      GroupedGemm: False
+    - &solutions
+      InitialSolutionParameters:
+      BenchmarkCommonParameters:
+        - KernelLanguage: ["Assembly"]
+      ForkParameters:
+        - MatrixInstruction:
+          - [16, 16, 128, 1, 1, 2, 2, 2, 2]
+        - DepthU: [256]
+        - GlobalReadVectorWidthA: [16, 32]
+        - GlobalReadVectorWidthB: [16, 32]
+        - PrefetchGlobalRead: [1, 2]
+        - PrefetchLocalRead: [1]
+        - ScheduleIterAlg: [3]
+        - SourceSwap: [false]
+        - DirectToLds: [1]
+        - TransposeLDS: [1]
+        - 1LDSBuffer: [0]
+        - StaggerU: [0]
+        - WavefrontSize: [64]
+        - WorkGroupMapping: [16]
+        - GlobalSplitU: [1]
+        - UseSubtileImpl: [true]
+      BenchmarkForkParameters:
+      JoinParameters:
+      BenchmarkJoinParameters:
+      BenchmarkFinalParameters:
+        - ProblemSizes:
+          - Exact: [256, 256, 1, 256]
+          - Exact: [1152, 64, 1, 5120]
+          - Exact: [1152, 7, 1, 5120]
+          - Exact: [5120, 64, 1, 576]
+          - Exact: [5120, 5, 1, 576]
+          - Exact: [1152, 1000, 1, 5120]
+  -
+    - # P2 MXFP8 A x MXFP4 B
+      OperationType: GEMM
+      DataType: F4
+      DataTypeA: F8
+      DestDataType: B
+      ComputeDataType: S
+      HighPrecisionAccumulate: True
+      TransposeA: True
+      TransposeB: False
+      UseBeta: True
+      Batched: True
+      SupportUserArgs: True
+      UseBias: 0
+      MXBlockA: 32
+      MXBlockB: 32
+      GroupedGemm: False
+    - &solutions2
+      InitialSolutionParameters:
+      BenchmarkCommonParameters:
+        - KernelLanguage: ["Assembly"]
+      ForkParameters:
+        - MatrixInstruction:
+          - [16, 16, 128, 1, 1, 2, 2, 2, 2]
+        - DepthU: [256]
+        - GlobalReadVectorWidthA: [16, 32]
+        - GlobalReadVectorWidthB: [16, 32]
+        - PrefetchGlobalRead: [1, 2]
+        - PrefetchLocalRead: [1]
+        - ScheduleIterAlg: [3]
+        - SourceSwap: [false]
+        - DirectToLds: [1]
+        - TransposeLDS: [1]
+        - 1LDSBuffer: [0]
+        - StaggerU: [0]
+        - WavefrontSize: [64]
+        - WorkGroupMapping: [16]
+        - GlobalSplitU: [1]
+        - UseSubtileImpl: [true]
+      BenchmarkForkParameters:
+      JoinParameters:
+      BenchmarkJoinParameters:
+      BenchmarkFinalParameters:
+        - ProblemSizes:
+          - Exact: [256, 256, 1, 256]
+          - Exact: [1152, 64, 1, 5120]
+          - Exact: [1152, 7, 1, 5120]
+          - Exact: [5120, 64, 1, 576]
+          - Exact: [5120, 5, 1, 576]
+          - Exact: [1152, 1000, 1, 5120]

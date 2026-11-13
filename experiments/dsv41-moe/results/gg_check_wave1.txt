@@ -1,0 +1,29 @@
+hipblaslt: /mnt/nvme1/vivizhan/dsv41_inferencex/hipblaslt-gg-ws/install/lib/libhipblaslt.so.1.5
+G=1                  M= 192 K= 512 groups=  1 active=  1 err=0.0017 pad_ok=True ok=True
+G=5 with empties     M= 192 K= 512 groups=  5 active=  3 err=0.0017 pad_ok=True ok=True
+G=64                 M= 192 K= 512 groups= 64 active= 48 err=0.0018 pad_ok=True ok=True
+G=65                 M= 192 K= 512 groups= 65 active= 49 err=0.0017 pad_ok=True ok=True
+G=100, half empty    M= 192 K= 512 groups=100 active= 54 err=0.0017 pad_ok=True ok=True
+G=130, only first    M= 192 K= 512 groups=130 active=  1 err=0.0017 pad_ok=True ok=True
+G=384, only last     M= 192 K= 512 groups=384 active=  1 err=0.0017 pad_ok=True ok=True
+G=384, sparse        M= 192 K= 512 groups=384 active= 76 err=0.0017 pad_ok=True ok=True
+G=384, dense         M= 192 K= 512 groups=384 active=375 err=0.0018 pad_ok=True ok=True
+G=1                  M=1152 K=5120 groups=  1 active=  1 err=0.0020 pad_ok=True ok=True
+G=5 with empties     M=1152 K=5120 groups=  5 active=  3 err=0.0020 pad_ok=True ok=True
+G=64                 M=1152 K=5120 groups= 64 active= 48 err=0.0020 pad_ok=True ok=True
+G=65                 M=1152 K=5120 groups= 65 active= 49 err=0.0020 pad_ok=True ok=True
+G=100, half empty    M=1152 K=5120 groups=100 active= 54 err=0.0020 pad_ok=True ok=True
+G=130, only first    M=1152 K=5120 groups=130 active=  1 err=0.0020 pad_ok=True ok=True
+G=384, only last     M=1152 K=5120 groups=384 active=  1 err=0.0020 pad_ok=True ok=True
+G=384, sparse        M=1152 K=5120 groups=384 active= 76 err=0.0020 pad_ok=True ok=True
+G=384, dense         M=1152 K=5120 groups=384 active=375 err=0.0020 pad_ok=True ok=True
+G=1                  M=5120 K= 576 groups=  1 active=  1 err=0.0017 pad_ok=True ok=True
+G=5 with empties     M=5120 K= 576 groups=  5 active=  3 err=0.0017 pad_ok=True ok=True
+G=64                 M=5120 K= 576 groups= 64 active= 48 err=0.0018 pad_ok=True ok=True
+G=65                 M=5120 K= 576 groups= 65 active= 49 err=0.0018 pad_ok=True ok=True
+G=100, half empty    M=5120 K= 576 groups=100 active= 54 err=0.0018 pad_ok=True ok=True
+G=130, only first    M=5120 K= 576 groups=130 active=  1 err=0.0017 pad_ok=True ok=True
+G=384, only last     M=5120 K= 576 groups=384 active=  1 err=0.0017 pad_ok=True ok=True
+G=384, sparse        M=5120 K= 576 groups=384 active= 76 err=0.0018 pad_ok=True ok=True
+G=384, dense         M=5120 K= 576 groups=384 active=375 err=0.0018 pad_ok=True ok=True
+checks: ALL OK

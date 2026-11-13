@@ -1,0 +1,25 @@
+per GEMM: 64x64 / best geko (tile) us; weight TB/s of best
+gemm1
+  T=    1 mixed 64x64   21.4 geko   13.5 geko_g1_b6n32_64x64                1.31TB/s | mxfp8 64x64   22.8 geko   15.7 geko_g1_b6n32_64x64                    2.26TB/s | geko mixed/mxfp8 speedup 1.16
+  T=    4 mixed 64x64   23.8 geko   17.2 geko_g1_b244n32_128x32             3.60TB/s | mxfp8 64x64   28.7 geko   25.5 geko_g1_b85n32+b384n32_128x32          4.86TB/s | geko mixed/mxfp8 speedup 1.48
+  T=   16 mixed 64x64   78.6 geko   52.4 geko_g1_b244n32_128x32             4.73TB/s | mxfp8 64x64  101.7 geko   90.0 geko_g1_b244n32_128x32                 5.50TB/s | geko mixed/mxfp8 speedup 1.72
+  T=   64 mixed 64x64  219.4 geko  131.4 geko_g1_b384n32_512x32             5.46TB/s | mxfp8 64x64  281.5 geko  251.3 geko_g1_b244n32_128x32                 5.70TB/s | geko mixed/mxfp8 speedup 1.91
+  T=  256 mixed 64x64  340.1 geko  198.8 geko_g1_b244n32_128x32             5.55TB/s | mxfp8 64x64  435.5 geko  374.7 geko_g1_b244n32_128x32                 5.89TB/s | geko mixed/mxfp8 speedup 1.88
+  T= 1024 mixed 64x64  349.8 geko  217.0 geko_g1_b244n32_128x32             5.22TB/s | mxfp8 64x64  455.6 geko  401.1 geko_g1_b85n32+b384n32_128x32          5.65TB/s | geko mixed/mxfp8 speedup 1.85
+  T= 4096 mixed 64x64  524.4 geko  315.0 geko_g1_b384n96_256x128            3.59TB/s | mxfp8 64x64  676.2 geko  487.0 geko_g1_b384n96_128x128                4.65TB/s | geko mixed/mxfp8 speedup 1.55
+gemm2
+  T=    1 mixed 64x64    7.4 geko    7.2 geko_g2_b85n32_128x32              1.23TB/s | mxfp8 64x64    8.6 geko    8.9 geko_g2_b6n32_128x32                   1.99TB/s | geko mixed/mxfp8 speedup 1.24
+  T=    4 mixed 64x64   24.7 geko   15.1 geko_g2_b244n32+b384n32_512x32     2.05TB/s | mxfp8 64x64   27.5 geko   19.9 geko_g2_b85n32+b244n32+b384n32_512x32  3.12TB/s | geko mixed/mxfp8 speedup 1.31
+  T=   16 mixed 64x64   84.5 geko   49.9 geko_g2_b6n32_128x32               2.48TB/s | mxfp8 64x64   93.8 geko   75.1 geko_g2_b85n32+b244n32+b384n32_512x32  3.30TB/s | geko mixed/mxfp8 speedup 1.50
+  T=   64 mixed 64x64  295.4 geko  149.0 geko_g2_b244n32+b384n32_512x32     2.40TB/s | mxfp8 64x64  317.6 geko  206.7 geko_g2_b85n32+b244n32+b384n32_512x32  3.47TB/s | geko mixed/mxfp8 speedup 1.39
+  T=  256 mixed 64x64  409.5 geko  217.8 geko_g2_b244n32+b384n32_512x32     2.53TB/s | mxfp8 64x64  443.3 geko  306.8 geko_g2_b85n32+b244n32+b384n32_512x32  3.59TB/s | geko mixed/mxfp8 speedup 1.41
+  T= 1024 mixed 64x64  451.6 geko  241.8 geko_g2_b244n32+b384n32_512x32     2.34TB/s | mxfp8 64x64  482.6 geko  332.1 geko_g2_b85n32+b244n32+b384n32_512x32  3.41TB/s | geko mixed/mxfp8 speedup 1.37
+  T= 4096 mixed 64x64  685.4 geko  419.2 geko_g2_b384n96_256x128            1.35TB/s | mxfp8 64x64  732.2 geko  505.0 geko_g2_b384n64_512x64                 2.24TB/s | geko mixed/mxfp8 speedup 1.20
+both GEMMs (us): mxfp8 64x64, mxfp8 geko, mixed 64x64, mixed geko; speedups of mixed geko
+  T=    1     31     24     29     21  vs mxfp8 geko 1.18  vs mixed 64x64 1.40  vs mxfp8 64x64 1.52
+  T=    4     56     45     49     32  vs mxfp8 geko 1.40  vs mixed 64x64 1.50  vs mxfp8 64x64 1.74
+  T=   16    196    165    163    102  vs mxfp8 geko 1.61  vs mixed 64x64 1.59  vs mxfp8 64x64 1.91
+  T=   64    599    458    515    280  vs mxfp8 geko 1.63  vs mixed 64x64 1.84  vs mxfp8 64x64 2.14
+  T=  256    879    682    750    417  vs mxfp8 geko 1.64  vs mixed 64x64 1.80  vs mxfp8 64x64 2.11
+  T= 1024    938    733    801    459  vs mxfp8 geko 1.60  vs mixed 64x64 1.75  vs mxfp8 64x64 2.04
+  T= 4096   1408    992   1210    734  vs mxfp8 geko 1.35  vs mixed 64x64 1.65  vs mxfp8 64x64 1.92

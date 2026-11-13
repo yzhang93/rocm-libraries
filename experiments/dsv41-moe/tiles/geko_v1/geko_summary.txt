@@ -1,0 +1,9 @@
+Grouped GEMM kernel time (profiler, us), hipblaslt-gg-geko; GEMM1 on GPU 6, GEMM2 on GPU 1
+tokens | 64x64 both | exp3 best both | best overall both | picks (GEMM1 / GEMM2) | vs exp3 | vs 64x64
+1 | 31.2 | 31.2 | 27.9 | geko_g1_b85n32_128x32 19.6 / 64x64 8.4 | 1.12x | 1.12x
+4 | 59.2 | 55.7 | 45.1 | geko_g1_b85n32_128x32 25.4 / geko_g2_b384n32_512x32 19.8 | 1.23x | 1.31x
+16 | 195.8 | 183.0 | 164.3 | geko_g1_b244n32_128x32 89.9 / geko_g2_b244n32_512x32 74.4 | 1.11x | 1.19x
+64 | 609.0 | 536.3 | 450.3 | geko_g1_b6n32_128x32 250.7 / geko_g2_b384n32_512x32 199.6 | 1.19x | 1.35x
+256 | 880.6 | 808.0 | 682.5 | geko_g1_b85n32_128x32 378.0 / geko_g2_b244n32_512x32 304.5 | 1.18x | 1.29x
+1024 | 937.7 | 859.1 | 730.4 | geko_g1_b85n32_128x32 401.6 / geko_g2_b384n32_512x32 328.8 | 1.18x | 1.28x
+4096 | 1552.6 | 1203.1 | 1203.1 | 128x128 612.3 / 256x128 590.8 | 1.00x | 1.29x

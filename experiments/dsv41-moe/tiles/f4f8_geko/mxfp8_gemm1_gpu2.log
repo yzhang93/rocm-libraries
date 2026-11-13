@@ -1,0 +1,133 @@
+[aiter] import [module_aiter_core] under /usr/local/lib/python3.12/dist-packages/aiter/jit/module_aiter_core.so
+hipblaslt: /mnt/nvme1/vivizhan/dsv41_inferencex/hipblaslt-gg-f4f8-geko/install/lib/libhipblaslt.so.1.5
+/usr/local/lib/python3.12/dist-packages/torch/profiler/profiler.py:272: UserWarning: Warning: Profiler clears events at the end of each cycle.Only events from the current cycle will be reported.To keep events across cycles, set acc_events=True.
+  _warn_once(
+USDT:2026-10-30 17:51:36 61098:61098 ActivityProfilerController.cpp:415] profiler_start
+USDT:2026-10-30 17:51:36 61098:61098 ActivityProfilerController.cpp:455] profiler_stop
+[W1030 17:51:36.482542891 collection.cpp:1182] Warning: ROCTracer produced duplicate flow start: 11 (function operator())
+{"us": 26.936674118041992, "gemm_us": 22.76056250000002, "kernel": "64x64", "groups": 6, "active_first_sample": 6, "weight_TBps": 1.55485788191746, "TFLOPs": 3.10971576383492, "tile": "64x64", "shape": "gemm1", "T": 1}
+USDT:2026-10-30 17:51:36 61098:61098 ActivityProfilerController.cpp:415] profiler_start
+USDT:2026-10-30 17:51:36 61098:61098 ActivityProfilerController.cpp:455] profiler_stop
+{"us": 20.069313049316406, "gemm_us": 15.656781249999982, "kernel": "geko_g1_b6n32_64x64", "groups": 6, "active_first_sample": 6, "weight_TBps": 2.260326655582548, "TFLOPs": 4.520653311165096, "tile": "geko_g1_b6n32_64x64", "shape": "gemm1", "T": 1}
+USDT:2026-10-30 17:51:37 61098:61098 ActivityProfilerController.cpp:415] profiler_start
+USDT:2026-10-30 17:51:37 61098:61098 ActivityProfilerController.cpp:455] profiler_stop
+{"us": 22.70711213350296, "gemm_us": 19.659281250000006, "kernel": "geko_g1_b85n32+b384n32_128x32", "groups": 6, "active_first_sample": 6, "weight_TBps": 1.8001390564571118, "TFLOPs": 3.6002781129142236, "tile": "geko_g1_b85n32+b384n32_128x32", "shape": "gemm1", "T": 1}
+USDT:2026-10-30 17:51:37 61098:61098 ActivityProfilerController.cpp:415] profiler_start
+USDT:2026-10-30 17:51:37 61098:61098 ActivityProfilerController.cpp:455] profiler_stop
+{"us": 22.468605637550354, "gemm_us": 19.434343749999993, "kernel": "geko_g1_b244n32_128x32", "groups": 6, "active_first_sample": 6, "weight_TBps": 1.820974273957669, "TFLOPs": 3.641948547915338, "tile": "geko_g1_b244n32_128x32", "shape": "gemm1", "T": 1}
+USDT:2026-10-30 17:51:37 61098:61098 ActivityProfilerController.cpp:415] profiler_start
+USDT:2026-10-30 17:51:37 61098:61098 ActivityProfilerController.cpp:455] profiler_stop
+{"us": 24.03712570667267, "gemm_us": 21.268187499999975, "kernel": "geko_g1_b384n64_128x64", "groups": 6, "active_first_sample": 6, "weight_TBps": 1.6639612566891298, "TFLOPs": 3.3279225133782595, "tile": "geko_g1_b384n64_128x64", "shape": "gemm1", "T": 1}
+USDT:2026-10-30 17:51:37 61098:61098 ActivityProfilerController.cpp:415] profiler_start
+USDT:2026-10-30 17:51:37 61098:61098 ActivityProfilerController.cpp:455] profiler_stop
+{"us": 26.465168595314026, "gemm_us": 23.663062500000013, "kernel": "geko_g1_b384n96_128x128", "groups": 6, "active_first_sample": 6, "weight_TBps": 1.4955562070632227, "TFLOPs": 2.9911124141264454, "tile": "geko_g1_b384n96_128x128", "shape": "gemm1", "T": 1}
+USDT:2026-10-30 17:51:37 61098:61098 ActivityProfilerController.cpp:415] profiler_start
+USDT:2026-10-30 17:51:37 61098:61098 ActivityProfilerController.cpp:455] profiler_stop
+{"us": 33.3552747964859, "gemm_us": 28.699406250000024, "kernel": "64x64", "groups": 24, "active_first_sample": 21, "weight_TBps": 4.31587465333015, "TFLOPs": 9.864856350468916, "tile": "64x64", "shape": "gemm1", "T": 4}
+USDT:2026-10-30 17:51:37 61098:61098 ActivityProfilerController.cpp:415] profiler_start
+USDT:2026-10-30 17:51:37 61098:61098 ActivityProfilerController.cpp:455] profiler_stop
+{"us": 38.17709982395172, "gemm_us": 33.50209375000006, "kernel": "geko_g1_b6n32_64x64", "groups": 24, "active_first_sample": 21, "weight_TBps": 3.69717310578536, "TFLOPs": 8.45068138465225, "tile": "geko_g1_b6n32_64x64", "shape": "gemm1", "T": 4}
+USDT:2026-10-30 17:51:37 61098:61098 ActivityProfilerController.cpp:415] profiler_start
+USDT:2026-10-30 17:51:37 61098:61098 ActivityProfilerController.cpp:455] profiler_stop
+{"us": 29.326707124710083, "gemm_us": 25.51184374999998, "kernel": "geko_g1_b85n32+b384n32_128x32", "groups": 24, "active_first_sample": 21, "weight_TBps": 4.855119105219516, "TFLOPs": 11.097415097644609, "tile": "geko_g1_b85n32+b384n32_128x32", "shape": "gemm1", "T": 4}
+USDT:2026-10-30 17:51:37 61098:61098 ActivityProfilerController.cpp:415] profiler_start
+USDT:2026-10-30 17:51:37 61098:61098 ActivityProfilerController.cpp:455] profiler_stop
+{"us": 29.445719718933105, "gemm_us": 25.660624999999982, "kernel": "geko_g1_b244n32_128x32", "groups": 24, "active_first_sample": 21, "weight_TBps": 4.826968945612202, "TFLOPs": 11.03307187568503, "tile": "geko_g1_b244n32_128x32", "shape": "gemm1", "T": 4}
+USDT:2026-10-30 17:51:37 61098:61098 ActivityProfilerController.cpp:415] profiler_start
+USDT:2026-10-30 17:51:37 61098:61098 ActivityProfilerController.cpp:455] profiler_stop
+{"us": 30.627980828285217, "gemm_us": 26.49437500000004, "kernel": "geko_g1_b384n64_128x64", "groups": 24, "active_first_sample": 21, "weight_TBps": 4.675069330754162, "TFLOPs": 10.685872756009514, "tile": "geko_g1_b384n64_128x64", "shape": "gemm1", "T": 4}
+USDT:2026-10-30 17:51:37 61098:61098 ActivityProfilerController.cpp:415] profiler_start
+USDT:2026-10-30 17:51:37 61098:61098 ActivityProfilerController.cpp:455] profiler_stop
+{"us": 32.166504859924316, "gemm_us": 28.066906250000084, "kernel": "geko_g1_b384n96_128x128", "groups": 24, "active_first_sample": 21, "weight_TBps": 4.413134775052011, "TFLOPs": 10.087165200118882, "tile": "geko_g1_b384n96_128x128", "shape": "gemm1", "T": 4}
+USDT:2026-10-30 17:51:37 61098:61098 ActivityProfilerController.cpp:415] profiler_start
+USDT:2026-10-30 17:51:37 61098:61098 ActivityProfilerController.cpp:455] profiler_stop
+{"us": 106.69143199920654, "gemm_us": 102.00684375000002, "kernel": "64x64", "groups": 96, "active_first_sample": 84, "weight_TBps": 4.8570482311389025, "TFLOPs": 11.101824528317492, "tile": "64x64", "shape": "gemm1", "T": 16}
+USDT:2026-10-30 17:51:37 61098:61098 ActivityProfilerController.cpp:415] profiler_start
+USDT:2026-10-30 17:51:37 61098:61098 ActivityProfilerController.cpp:455] profiler_stop
+{"us": 114.4060492515564, "gemm_us": 109.9768749999999, "kernel": "geko_g1_b6n32_64x64", "groups": 96, "active_first_sample": 84, "weight_TBps": 4.5050576314338855, "TFLOPs": 10.297274586134597, "tile": "geko_g1_b6n32_64x64", "shape": "gemm1", "T": 16}
+USDT:2026-10-30 17:51:38 61098:61098 ActivityProfilerController.cpp:415] profiler_start
+USDT:2026-10-30 17:51:38 61098:61098 ActivityProfilerController.cpp:455] profiler_stop
+{"us": 94.41395998001099, "gemm_us": 90.08293750000001, "kernel": "geko_g1_b85n32+b384n32_128x32", "groups": 96, "active_first_sample": 84, "weight_TBps": 5.499955638102942, "TFLOPs": 12.571327172806726, "tile": "geko_g1_b85n32+b384n32_128x32", "shape": "gemm1", "T": 16}
+USDT:2026-10-30 17:51:38 61098:61098 ActivityProfilerController.cpp:415] profiler_start
+USDT:2026-10-30 17:51:38 61098:61098 ActivityProfilerController.cpp:455] profiler_stop
+{"us": 94.85399127006531, "gemm_us": 90.05046875000036, "kernel": "geko_g1_b244n32_128x32", "groups": 96, "active_first_sample": 84, "weight_TBps": 5.501938711451716, "TFLOPs": 12.575859911889637, "tile": "geko_g1_b244n32_128x32", "shape": "gemm1", "T": 16}
+USDT:2026-10-30 17:51:38 61098:61098 ActivityProfilerController.cpp:415] profiler_start
+USDT:2026-10-30 17:51:38 61098:61098 ActivityProfilerController.cpp:455] profiler_stop
+{"us": 97.47677445411682, "gemm_us": 92.87421875000021, "kernel": "geko_g1_b384n64_128x64", "groups": 96, "active_first_sample": 84, "weight_TBps": 5.334657633391924, "TFLOPs": 12.193503162038684, "tile": "geko_g1_b384n64_128x64", "shape": "gemm1", "T": 16}
+USDT:2026-10-30 17:51:38 61098:61098 ActivityProfilerController.cpp:415] profiler_start
+USDT:2026-10-30 17:51:38 61098:61098 ActivityProfilerController.cpp:455] profiler_stop
+{"us": 101.43959522247314, "gemm_us": 96.74549999999986, "kernel": "geko_g1_b384n96_128x128", "groups": 96, "active_first_sample": 84, "weight_TBps": 5.121190753058289, "TFLOPs": 11.705578864133232, "tile": "geko_g1_b384n96_128x128", "shape": "gemm1", "T": 16}
+USDT:2026-10-30 17:51:39 61098:61098 ActivityProfilerController.cpp:415] profiler_start
+USDT:2026-10-30 17:51:39 61098:61098 ActivityProfilerController.cpp:455] profiler_stop
+{"us": 280.88743686676025, "gemm_us": 281.54965624999966, "kernel": "64x64", "groups": 384, "active_first_sample": 243, "weight_TBps": 5.090655549326397, "TFLOPs": 16.088985439846386, "tile": "64x64", "shape": "gemm1", "T": 64}
+USDT:2026-10-30 17:51:39 61098:61098 ActivityProfilerController.cpp:415] profiler_start
+USDT:2026-10-30 17:51:40 61098:61098 ActivityProfilerController.cpp:455] profiler_stop
+{"us": 320.65277099609375, "gemm_us": 325.1928124999991, "kernel": "geko_g1_b6n32_64x64", "groups": 384, "active_first_sample": 243, "weight_TBps": 4.407453870155892, "TFLOPs": 13.929730750122323, "tile": "geko_g1_b6n32_64x64", "shape": "gemm1", "T": 64}
+USDT:2026-10-30 17:51:40 61098:61098 ActivityProfilerController.cpp:415] profiler_start
+USDT:2026-10-30 17:51:40 61098:61098 ActivityProfilerController.cpp:455] profiler_stop
+{"us": 279.11925315856934, "gemm_us": 251.82900000000015, "kernel": "geko_g1_b85n32+b384n32_128x32", "groups": 384, "active_first_sample": 243, "weight_TBps": 5.691450627211318, "TFLOPs": 17.987794574890092, "tile": "geko_g1_b85n32+b384n32_128x32", "shape": "gemm1", "T": 64}
+USDT:2026-10-30 17:51:41 61098:61098 ActivityProfilerController.cpp:415] profiler_start
+USDT:2026-10-30 17:51:41 61098:61098 ActivityProfilerController.cpp:455] profiler_stop
+{"us": 252.85120010375977, "gemm_us": 251.9516562499995, "kernel": "geko_g1_b244n32_128x32", "groups": 384, "active_first_sample": 243, "weight_TBps": 5.688679889358746, "TFLOPs": 17.979037675010357, "tile": "geko_g1_b244n32_128x32", "shape": "gemm1", "T": 64}
+USDT:2026-10-30 17:51:42 61098:61098 ActivityProfilerController.cpp:415] profiler_start
+USDT:2026-10-30 17:51:42 61098:61098 ActivityProfilerController.cpp:455] profiler_stop
+{"us": 259.7828149795532, "gemm_us": 259.06056250000063, "kernel": "geko_g1_b384n64_128x64", "groups": 384, "active_first_sample": 243, "weight_TBps": 5.53257626775977, "TFLOPs": 17.485673142549395, "tile": "geko_g1_b384n64_128x64", "shape": "gemm1", "T": 64}
+USDT:2026-10-30 17:51:42 61098:61098 ActivityProfilerController.cpp:415] profiler_start
+USDT:2026-10-30 17:51:42 61098:61098 ActivityProfilerController.cpp:455] profiler_stop
+{"us": 279.7879219055176, "gemm_us": 271.6782187500013, "kernel": "geko_g1_b384n96_128x128", "groups": 384, "active_first_sample": 243, "weight_TBps": 5.27562469525354, "TFLOPs": 16.673579283764273, "tile": "geko_g1_b384n96_128x128", "shape": "gemm1", "T": 64}
+USDT:2026-10-30 17:51:43 61098:61098 ActivityProfilerController.cpp:415] profiler_start
+USDT:2026-10-30 17:51:43 61098:61098 ActivityProfilerController.cpp:455] profiler_stop
+{"us": 440.5977725982666, "gemm_us": 437.1932187499987, "kernel": "64x64", "groups": 384, "active_first_sample": 374, "weight_TBps": 5.045690704689153, "TFLOPs": 41.4448177668585, "tile": "64x64", "shape": "gemm1", "T": 256}
+USDT:2026-10-30 17:51:44 61098:61098 ActivityProfilerController.cpp:415] profiler_start
+USDT:2026-10-30 17:51:44 61098:61098 ActivityProfilerController.cpp:455] profiler_stop
+{"us": 473.6623764038086, "gemm_us": 486.14290625000126, "kernel": "geko_g1_b6n32_64x64", "groups": 384, "active_first_sample": 374, "weight_TBps": 4.537640540754047, "TFLOPs": 37.27174262351988, "tile": "geko_g1_b6n32_64x64", "shape": "gemm1", "T": 256}
+USDT:2026-10-30 17:51:44 61098:61098 ActivityProfilerController.cpp:415] profiler_start
+USDT:2026-10-30 17:51:44 61098:61098 ActivityProfilerController.cpp:455] profiler_stop
+{"us": 377.14686393737793, "gemm_us": 378.7111562499998, "kernel": "geko_g1_b85n32+b384n32_128x32", "groups": 384, "active_first_sample": 374, "weight_TBps": 5.824866058457978, "TFLOPs": 47.84488912187943, "tile": "geko_g1_b85n32+b384n32_128x32", "shape": "gemm1", "T": 256}
+USDT:2026-10-30 17:51:45 61098:61098 ActivityProfilerController.cpp:415] profiler_start
+USDT:2026-10-30 17:51:45 61098:61098 ActivityProfilerController.cpp:455] profiler_stop
+{"us": 381.03954792022705, "gemm_us": 374.67493749999977, "kernel": "geko_g1_b244n32_128x32", "groups": 384, "active_first_sample": 374, "weight_TBps": 5.8876149408845935, "TFLOPs": 48.36030240213228, "tile": "geko_g1_b244n32_128x32", "shape": "gemm1", "T": 256}
+USDT:2026-10-30 17:51:46 61098:61098 ActivityProfilerController.cpp:415] profiler_start
+USDT:2026-10-30 17:51:46 61098:61098 ActivityProfilerController.cpp:455] profiler_stop
+{"us": 387.643027305603, "gemm_us": 391.8712812499982, "kernel": "geko_g1_b384n64_128x64", "groups": 384, "active_first_sample": 374, "weight_TBps": 5.629250893210257, "TFLOPs": 46.238124983801896, "tile": "geko_g1_b384n64_128x64", "shape": "gemm1", "T": 256}
+USDT:2026-10-30 17:51:47 61098:61098 ActivityProfilerController.cpp:415] profiler_start
+USDT:2026-10-30 17:51:47 61098:61098 ActivityProfilerController.cpp:455] profiler_stop
+{"us": 402.2270202636719, "gemm_us": 411.48409374999983, "kernel": "geko_g1_b384n96_128x128", "groups": 384, "active_first_sample": 374, "weight_TBps": 5.360940540608687, "TFLOPs": 44.03424957419756, "tile": "geko_g1_b384n96_128x128", "shape": "gemm1", "T": 256}
+USDT:2026-10-30 17:51:47 61098:61098 ActivityProfilerController.cpp:415] profiler_start
+USDT:2026-10-30 17:51:47 61098:61098 ActivityProfilerController.cpp:455] profiler_stop
+{"us": 449.5265007019043, "gemm_us": 461.6174687500004, "kernel": "64x64", "groups": 384, "active_first_sample": 384, "weight_TBps": 4.906495774809211, "TFLOPs": 157.00786479389475, "tile": "64x64", "shape": "gemm1", "T": 1024}
+USDT:2026-10-30 17:51:48 61098:61098 ActivityProfilerController.cpp:415] profiler_start
+USDT:2026-10-30 17:51:48 61098:61098 ActivityProfilerController.cpp:455] profiler_stop
+{"us": 512.2921943664551, "gemm_us": 519.84959375, "kernel": "geko_g1_b6n32_64x64", "groups": 384, "active_first_sample": 384, "weight_TBps": 4.356883581771577, "TFLOPs": 139.42027461669048, "tile": "geko_g1_b6n32_64x64", "shape": "gemm1", "T": 1024}
+USDT:2026-10-30 17:51:49 61098:61098 ActivityProfilerController.cpp:415] profiler_start
+USDT:2026-10-30 17:51:49 61098:61098 ActivityProfilerController.cpp:455] profiler_stop
+{"us": 398.5084295272827, "gemm_us": 401.0701562499989, "kernel": "geko_g1_b85n32+b384n32_128x32", "groups": 384, "active_first_sample": 384, "weight_TBps": 5.64720192890195, "TFLOPs": 180.7104617248624, "tile": "geko_g1_b85n32+b384n32_128x32", "shape": "gemm1", "T": 1024}
+USDT:2026-10-30 17:51:50 61098:61098 ActivityProfilerController.cpp:415] profiler_start
+USDT:2026-10-30 17:51:50 61098:61098 ActivityProfilerController.cpp:455] profiler_stop
+{"us": 415.03443717956543, "gemm_us": 418.37659374999936, "kernel": "geko_g1_b244n32_128x32", "groups": 384, "active_first_sample": 384, "weight_TBps": 5.4136015107800315, "TFLOPs": 173.235248344961, "tile": "geko_g1_b244n32_128x32", "shape": "gemm1", "T": 1024}
+USDT:2026-10-30 17:51:50 61098:61098 ActivityProfilerController.cpp:415] profiler_start
+USDT:2026-10-30 17:51:50 61098:61098 ActivityProfilerController.cpp:455] profiler_stop
+{"us": 404.3879985809326, "gemm_us": 409.6691562499991, "kernel": "geko_g1_b384n64_128x64", "groups": 384, "active_first_sample": 384, "weight_TBps": 5.52866654822761, "TFLOPs": 176.91732954328353, "tile": "geko_g1_b384n64_128x64", "shape": "gemm1", "T": 1024}
+USDT:2026-10-30 17:51:51 61098:61098 ActivityProfilerController.cpp:415] profiler_start
+USDT:2026-10-30 17:51:51 61098:61098 ActivityProfilerController.cpp:455] profiler_stop
+{"us": 419.01421546936035, "gemm_us": 427.76940624999867, "kernel": "geko_g1_b384n96_128x128", "groups": 384, "active_first_sample": 384, "weight_TBps": 5.294731523357994, "TFLOPs": 169.4314087474558, "tile": "geko_g1_b384n96_128x128", "shape": "gemm1", "T": 1024}
+USDT:2026-10-30 17:51:52 61098:61098 ActivityProfilerController.cpp:415] profiler_start
+USDT:2026-10-30 17:51:52 61098:61098 ActivityProfilerController.cpp:455] profiler_stop
+{"us": 684.0858459472656, "gemm_us": 676.1781874999997, "kernel": "64x64", "groups": 384, "active_first_sample": 384, "weight_TBps": 3.3495966031882696, "TFLOPs": 428.7483652080985, "tile": "64x64", "shape": "gemm1", "T": 4096}
+USDT:2026-10-30 17:51:53 61098:61098 ActivityProfilerController.cpp:415] profiler_start
+USDT:2026-10-30 17:51:53 61098:61098 ActivityProfilerController.cpp:455] profiler_stop
+{"us": 779.286527633667, "gemm_us": 787.0374375000008, "kernel": "geko_g1_b6n32_64x64", "groups": 384, "active_first_sample": 384, "weight_TBps": 2.8777845272449287, "TFLOPs": 368.3564194873509, "tile": "geko_g1_b6n32_64x64", "shape": "gemm1", "T": 4096}
+USDT:2026-10-30 17:51:54 61098:61098 ActivityProfilerController.cpp:415] profiler_start
+USDT:2026-10-30 17:51:54 61098:61098 ActivityProfilerController.cpp:455] profiler_stop
+{"us": 758.5780143737793, "gemm_us": 764.3620000000013, "kernel": "geko_g1_b85n32+b384n32_128x32", "groups": 384, "active_first_sample": 384, "weight_TBps": 2.9631564101826044, "TFLOPs": 379.28402050337337, "tile": "geko_g1_b85n32+b384n32_128x32", "shape": "gemm1", "T": 4096}
+USDT:2026-10-30 17:51:55 61098:61098 ActivityProfilerController.cpp:415] profiler_start
+USDT:2026-10-30 17:51:55 61098:61098 ActivityProfilerController.cpp:455] profiler_stop
+{"us": 765.7692909240723, "gemm_us": 772.4847187500009, "kernel": "geko_g1_b244n32_128x32", "groups": 384, "active_first_sample": 384, "weight_TBps": 2.931998659682221, "TFLOPs": 375.2958284393243, "tile": "geko_g1_b244n32_128x32", "shape": "gemm1", "T": 4096}
+USDT:2026-10-30 17:51:56 61098:61098 ActivityProfilerController.cpp:415] profiler_start
+USDT:2026-10-30 17:51:56 61098:61098 ActivityProfilerController.cpp:455] profiler_stop
+{"us": 613.7231826782227, "gemm_us": 622.3924062499992, "kernel": "geko_g1_b384n64_128x64", "groups": 384, "active_first_sample": 384, "weight_TBps": 3.639061365877651, "TFLOPs": 465.79985483233935, "tile": "geko_g1_b384n64_128x64", "shape": "gemm1", "T": 4096}
+USDT:2026-10-30 17:51:57 61098:61098 ActivityProfilerController.cpp:415] profiler_start
+USDT:2026-10-30 17:51:57 61098:61098 ActivityProfilerController.cpp:455] profiler_stop
+{"us": 486.4381790161133, "gemm_us": 489.31265624999975, "kernel": "geko_g1_b384n96_128x128", "groups": 384, "active_first_sample": 384, "weight_TBps": 4.628787199901906, "TFLOPs": 592.4847615874439, "tile": "geko_g1_b384n96_128x128", "shape": "gemm1", "T": 4096}
+wrote f4f8_geko/mxfp8_gemm1_gpu2.json
+EXIT=0

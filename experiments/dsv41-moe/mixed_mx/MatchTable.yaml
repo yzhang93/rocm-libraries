@@ -1,0 +1,8 @@
+---
+0: [/mnt/nvme1/vivizhan/dsv41_inferencex/src/rocm-libraries-gg/projects/hipblaslt/library/src/amd_detail/rocblaslt/src/Tensile/Logic/asm_full/gfx950/gfx950/GridBased/gfx950_Cijk_Alik_Bljk_F4F8_F4BS_MXAE8B32_MXBE8B32_BH_Bias_GG_HA_S_SAB_SAV_UserArgs.yaml,
+  0]
+1: [/mnt/nvme1/vivizhan/dsv41_inferencex/src/rocm-libraries-gg/projects/hipblaslt/library/src/amd_detail/rocblaslt/src/Tensile/Logic/asm_full/gfx950/gfx950/GridBased/gfx950_Cijk_Alik_Bljk_F8F4_F8BS_MXAE8B32_MXBE8B32_BH_Bias_GG_HA_S_SAB_SAV_UserArgs.yaml,
+  0]
+2: [/mnt/nvme1/vivizhan/dsv41_inferencex/src/rocm-libraries-gg/projects/hipblaslt/library/src/amd_detail/rocblaslt/src/Tensile/Logic/asm_full/gfx950/gfx950/GridBased/gfx950_Cijk_Alik_Bljk_F8BS_MXAE8B32_MXBE8B32_BH_Bias_GG_HA_S_SAB_SAV_UserArgs.yaml,
+  0]
+...

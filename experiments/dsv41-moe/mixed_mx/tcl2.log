@@ -1,0 +1,169 @@
+
+################################################################################
+# Tensile Create Library
+Capability                  gfx950
+HasMFMA_bf16_1k             1     
+HasWMMA_AccImmZero          -     
+HasAddLshl                  1     
+HasAtomicAdd                1     
+HasAtomicPkAddBF16          1     
+HasBF16CVT                  1     
+HasClusterBarrier           -     
+HasCvtFP8toF16              -     
+HasCvtScalePk8Bf8F32        -     
+HasCvtScalePk8Fp8F32        -     
+HasDLCModifier              -     
+HasDirectToLds              1     
+HasDirectToLdsx4            1     
+HasExplicitCO               1     
+HasExplicitNC               -     
+HasGLCModifier              -     
+HasGLTr16B128               -     
+HasGLTr8B64                 -     
+HasGlobalPrefetch           -     
+HasLDSTr                    1     
+HasLDSTrB128B16             -     
+HasLDSTrB64B16              1     
+HasLDSTrB64B4               -     
+HasLDSTrB64B8               -     
+HasLDSTrB96B6               -     
+HasLshlOr                   1     
+HasMFMA                     1     
+HasMUBUFConst               1     
+HasMovRelsD2B32             -     
+HasNTModifier               1     
+HasNVModifier               -     
+HasNewBarrier               -     
+HasPartialOOB               1     
+HasPkF16CVT                 1     
+HasSAtomic                  1     
+HasSC0Modifier              1     
+HasSCMPK                    1     
+HasSCOPEModifier            -     
+HasSMFMA                    1     
+HasSMulHi                   1     
+HasSWMMAC                   -     
+HasScalarStore              1     
+HasScaleSRPk8Cvt            -     
+HasTDM                      -     
+HasTHModifier               -     
+HasVMaximumMinimumF32       -     
+HasVgprMSB                  -     
+HasVgprMSB16                -     
+HasWMMA                     -     
+HasXcnt                     -     
+MaxLgkmcnt                  1     
+MaxVmcnt                    1     
+SeparateLGKMcnt             -     
+SeparateVMcnt               -     
+SeparateVscnt               -     
+ShortBranchMaxLength        1     
+SupportedISA                1     
+SupportedSource             1     
+HasWMMA_V1                  -     
+HasWMMA_V2                  -     
+HasWMMA_V3                  -     
+s_delay_alu                 -     
+v_prng_b32                  1     
+v_mov_b64                   1     
+HasMFMA_b8                  1     
+v_dot2_f32_bf16             1     
+v_dot2c_f32_bf16            1     
+HasMFMA_explictB            1     
+Hascvtfp8_f16               1     
+v_dot2_f32_f16              1     
+v_dot2c_f32_f16             1     
+v_fma_f16                   1     
+v_fmac_f16                  -     
+v_mac_f16                   1     
+v_pk_fma_f16                1     
+v_pk_fmac_f16               -     
+v_dual_fmac_f32             -     
+v_fma_f32                   1     
+v_fma_mix_f32               1     
+v_fmac_f32                  1     
+v_mac_f32                   -     
+v_mad_mix_f32               -     
+v_pk_add_f32                1     
+v_pk_fma_f32                1     
+v_pk_mul_f32                1     
+HasMFMA_f64                 1     
+HasWMMA_V3_f64              -     
+v_fma_f64                   1     
+HasMFMA_f8                  1     
+HasMFMA_f8f6f4              1     
+HasWMMA_f8f6f4              -     
+HasSWMMAC_gfx1250           -     
+HasAdd_PC_i64               -     
+VOP3v_dot4_i32_i8           1     
+v_dot4_i32_i8               -     
+v_dot4c_i32_i8              1     
+Hascvtf16_fp8_sf32          1     
+s_add_u64                   -     
+s_sub_u64                   -     
+v_add_nc_u64                -     
+HasMFMA_xf32                -     
+ArchAccUnifiedRegs          1     
+CMPXWritesSGPR              1     
+CacheLineBytes              1     
+CrosslaneWait               1     
+DSLow16NotPreserve          -     
+DefaultScopeIsCULocal       -     
+DeviceLDS                   1     
+EnableXnackReplay           -     
+F32XEmulationInfSupport     -     
+HasAccCD                    1     
+HasEccHalf                  1     
+HasF32XEmulation            1     
+HasFP8_OCP                  -     
+HasInvWbDevFences           -     
+HasMXScaleSwizzle           1     
+HasSchedMode                -     
+HasWave32                   -     
+HasWavefrontSize32Directive -     
+HasWmmaArbStallBit          -     
+HasXCDSplitL2               1     
+LDSBankCount                1     
+LDSBankWidth                1     
+LdsGranularity              1     
+MaxSgprPreload              1     
+MaxWavesPerSimd             1     
+NoSDWA                      -     
+NumXCD                      1     
+RequiresXCntForVolatileVMEM -     
+SDWAWait                    1     
+SgprPreloadPad              1     
+TransOpWait                 1     
+VOP3ByteSel                 -     
+VgprBank                    -     
+Waitcnt0Disabled            1     
+WmmaArbStallBitOffset       1     
+WorkGroupIdFromTTM          -     
+# Found ROCm version 7.2.53211
+ROCm 7.2.53211 Component path: /opt/rocm/bin/amdclang++ version: 22.0.0
+ROCm 7.2.53211 Component path: /opt/rocm/lib/llvm/bin/clang-offload-bundler version: 22.0.0
+# LogicFilter:       /mnt/nvme1/vivizhan/dsv41_inferencex/src/rocm-libraries-gg/projects/hipblaslt/library/**/*_F?BS_MXAE8B32_MXBE8B32_BH_Bias_GG_*.yaml
+# Experimental:      False
+# Archs: gfx950
+# LibraryLogicFiles: 3
+Loading Logics...: Launching 32 threads...
+Loading Logics...: Done. (0.0 secs elapsed)
+Number of solutions parsed: 3
+Number of unique solutions: 3
+Time to load yaml files (s): 0.24
+Number of duplicate kernels: 0
+Generating assembly kernels: Launching 32 threads for 3 tasks...
+Generating assembly kernels: Done. (0.3 secs elapsed)
+buildSourceCodeObjectFile time (s): 0.00  [cache hit]
+Time to generate kernels (s): 0.39
+Time to pass kernel info to library (s): 0.00
+Writing master solution libraries: Launching 32 threads for 3 tasks...
+Writing master solution libraries: Done. (0.1 secs elapsed)
+Time to write master solution libraries (s): 0.12
+# Tensile Library Writer DONE
+################################################################################
+
+Total time (s): 1.91
+Total kernels processed: 3
+Kernels processed per second: 1.57
+KernelHelperObjs: 8
