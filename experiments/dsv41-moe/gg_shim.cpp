@@ -18,6 +18,12 @@ namespace
 {
     hipblasLtHandle_t g_handle = nullptr;
 
+    // HIPBLASLT_MATMUL_DESC_MOE_*_POINTER_EXT (users/vivizhan/moe-sorted-layout), spelled as
+    // values so the shim still builds against hipBLASLt headers without them.
+    constexpr auto kMoeSortedExpertIds = static_cast<hipblasLtMatmulDescAttributes_t>(108);
+    constexpr auto kMoeNumValidIds     = static_cast<hipblasLtMatmulDescAttributes_t>(109);
+    constexpr auto kMoeSortedIds       = static_cast<hipblasLtMatmulDescAttributes_t>(110);
+
     struct Plan
     {
         hipblasLtMatmulDesc_t            desc = nullptr;
@@ -168,6 +174,151 @@ int gg_create(void**      planOut,
 const char* gg_kernel_name(void* plan)
 {
     return static_cast<Plan*>(plan)->kernelName.c_str();
+}
+
+// MoE expert GEMM on aiter's sorted token layout (HIPBLASLT_MATMUL_DESC_MOE_*): one
+// non-grouped MXFP4 A x MXFP8 B TN GEMM over P sorted, block-padded rows,
+//   D[P, M] = B[rows, K] . A_e[M, K]^T   with e = sorted_expert_ids[row / MT1]
+// A holds all experts at aStride elements apart. rowsB > 0 gathers B rows through
+// sorted_ids (B has rowsB token rows); rowsB = 0 reads B in sorted order (P rows).
+// The MoE pointers set the heuristic's mode here and are reset on every run.
+int moe_create(void**      planOut,
+               int64_t     M,
+               int64_t     K,
+               int64_t     P,
+               int64_t     rowsB,
+               int64_t     aStride,
+               const void* sortedExpertIds,
+               const void* numValidIds,
+               const void* sortedIds,
+               uint64_t    wsBytes)
+{
+    if(!g_handle)
+        CHECK(hipblasLtCreate(&g_handle));
+    auto*         p     = new Plan;
+    const int64_t bRows = rowsB > 0 ? rowsB : P;
+    const int64_t bStr  = bRows * K;
+    CHECK(hipblasLtMatrixLayoutCreate(&p->la, HIP_R_4F_E2M1, K, M, K));
+    CHECK(hipblasLtMatrixLayoutCreate(&p->lb, HIP_R_8F_E4M3, K, P, K));
+    CHECK(hipblasLtMatrixLayoutCreate(&p->lc, HIP_R_16BF, M, P, M));
+    CHECK(hipblasLtMatrixLayoutCreate(&p->ld, HIP_R_16BF, M, P, M));
+    CHECK(hipblasLtMatrixLayoutSetAttribute(
+        p->la, HIPBLASLT_MATRIX_LAYOUT_STRIDED_BATCH_OFFSET, &aStride, sizeof(aStride)));
+    CHECK(hipblasLtMatrixLayoutSetAttribute(
+        p->lb, HIPBLASLT_MATRIX_LAYOUT_STRIDED_BATCH_OFFSET, &bStr, sizeof(bStr)));
+    const int64_t dStr = M * P;
+    for(auto l : {p->lc, p->ld})
+        CHECK(hipblasLtMatrixLayoutSetAttribute(
+            l, HIPBLASLT_MATRIX_LAYOUT_STRIDED_BATCH_OFFSET, &dStr, sizeof(dStr)));
+
+    CHECK(hipblasLtMatmulDescCreate(&p->desc, HIPBLAS_COMPUTE_32F, HIP_R_32F));
+    hipblasOperation_t opA = HIPBLAS_OP_T, opB = HIPBLAS_OP_N;
+    CHECK(hipblasLtMatmulDescSetAttribute(p->desc, HIPBLASLT_MATMUL_DESC_TRANSA, &opA, sizeof(opA)));
+    CHECK(hipblasLtMatmulDescSetAttribute(p->desc, HIPBLASLT_MATMUL_DESC_TRANSB, &opB, sizeof(opB)));
+    hipblasLtMatmulMatrixScale_t mode = HIPBLASLT_MATMUL_MATRIX_SCALE_BLK32_UE8M0_32_8_EXT;
+    for(auto attr : {HIPBLASLT_MATMUL_DESC_A_SCALE_MODE, HIPBLASLT_MATMUL_DESC_B_SCALE_MODE})
+        CHECK(hipblasLtMatmulDescSetAttribute(p->desc, attr, &mode, sizeof(mode)));
+    CHECK(hipblasLtMatmulDescSetAttribute(p->desc,
+                                          kMoeSortedExpertIds,
+                                          &sortedExpertIds,
+                                          sizeof(sortedExpertIds)));
+    CHECK(hipblasLtMatmulDescSetAttribute(
+        p->desc, kMoeNumValidIds, &numValidIds, sizeof(numValidIds)));
+    if(rowsB > 0)
+        CHECK(hipblasLtMatmulDescSetAttribute(
+            p->desc, kMoeSortedIds, &sortedIds, sizeof(sortedIds)));
+
+    hipblasLtMatmulPreference_t pref = nullptr;
+    CHECK(hipblasLtMatmulPreferenceCreate(&pref));
+    CHECK(hipblasLtMatmulPreferenceSetAttribute(
+        pref, HIPBLASLT_MATMUL_PREF_MAX_WORKSPACE_BYTES, &wsBytes, sizeof(wsBytes)));
+
+    constexpr int                    kMaxAlgos = 32;
+    hipblasLtMatmulHeuristicResult_t results[kMaxAlgos]{};
+    const char*                      match = std::getenv("GG_KERNEL_MATCH");
+    const bool                       list  = std::getenv("GG_LIST_ALGOS") != nullptr;
+    int                              count = 0;
+    CHECK(hipblasLtMatmulAlgoGetHeuristic(
+        g_handle, p->desc, p->la, p->lb, p->lc, p->ld, pref, kMaxAlgos, results, &count));
+    hipblasLtMatmulPreferenceDestroy(pref);
+    int pick = count > 0 ? 0 : -1;
+    if(match)
+    {
+        pick = -1;
+        for(int i = 0; i < count && pick < 0; ++i)
+            if(hipblaslt_ext::getKernelNameFromAlgo(g_handle, results[i].algo).find(match)
+               != std::string::npos)
+                pick = i;
+    }
+    if(list)
+        for(int i = 0; i < count; ++i)
+            std::fprintf(stderr,
+                         "gg_shim: moe algo %d%s %s\n",
+                         i,
+                         i == pick ? "*" : " ",
+                         hipblaslt_ext::getKernelNameFromAlgo(g_handle, results[i].algo).c_str());
+    if(pick < 0)
+    {
+        std::fprintf(stderr,
+                     "gg_shim: no MoE solution (M=%ld K=%ld P=%ld%s%s)\n",
+                     long(M),
+                     long(K),
+                     long(P),
+                     match ? " matching " : "",
+                     match ? match : "");
+        return -1;
+    }
+    p->result     = results[pick];
+    p->kernelName = hipblaslt_ext::getKernelNameFromAlgo(g_handle, p->result.algo);
+    *planOut      = p;
+    return 0;
+}
+
+int moe_run(void*       plan,
+            const void* a,
+            const void* aScale,
+            const void* b,
+            const void* bScale,
+            void*       d,
+            const void* sortedExpertIds,
+            const void* numValidIds,
+            const void* sortedIds,
+            void*       ws,
+            uint64_t    wsBytes,
+            void*       stream)
+{
+    auto* p = static_cast<Plan*>(plan);
+    CHECK(hipblasLtMatmulDescSetAttribute(
+        p->desc, HIPBLASLT_MATMUL_DESC_A_SCALE_POINTER, &aScale, sizeof(aScale)));
+    CHECK(hipblasLtMatmulDescSetAttribute(
+        p->desc, HIPBLASLT_MATMUL_DESC_B_SCALE_POINTER, &bScale, sizeof(bScale)));
+    CHECK(hipblasLtMatmulDescSetAttribute(p->desc,
+                                          kMoeSortedExpertIds,
+                                          &sortedExpertIds,
+                                          sizeof(sortedExpertIds)));
+    CHECK(hipblasLtMatmulDescSetAttribute(
+        p->desc, kMoeNumValidIds, &numValidIds, sizeof(numValidIds)));
+    if(sortedIds)
+        CHECK(hipblasLtMatmulDescSetAttribute(
+            p->desc, kMoeSortedIds, &sortedIds, sizeof(sortedIds)));
+    const float alpha = 1.f, beta = 0.f;
+    CHECK(hipblasLtMatmul(g_handle,
+                          p->desc,
+                          &alpha,
+                          a,
+                          p->la,
+                          b,
+                          p->lb,
+                          &beta,
+                          d,
+                          p->lc,
+                          d,
+                          p->ld,
+                          &p->result.algo,
+                          ws,
+                          wsBytes,
+                          static_cast<hipStream_t>(stream)));
+    return 0;
 }
 
 // aPtrs, bPtrs, dPtrs: device arrays of per-group pointers. C = D with beta = 0.
