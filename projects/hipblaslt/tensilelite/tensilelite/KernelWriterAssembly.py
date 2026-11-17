@@ -2957,6 +2957,22 @@ class KernelWriterAssembly(KernelWriter):
       return False
     return True
 
+  # Bit 29 of gemm_count (below ArgType): the device user args are followed by a tile table.
+  GROUPED_TILE_TABLE_FLAG = 1 << 29
+  GROUPED_GEMM_COUNT_MASK = (1 << 29) - 1
+
+  def groupedTileTableSupported(self, kernel, gsuModule) -> bool:
+    """Whether a grouped kernel can find its gemm in a tile table instead of searching.
+
+    With ArgType 2 and GROUPED_TILE_TABLE_FLAG set in gemm_count, the device user args
+    (gemm_count records of userArgsInfo.totalSize bytes, padded to 256 bytes) are followed by
+    the table: the total tile count of every gemm at byte 0, then from byte 16 one
+    (gemm index, tile within the gemm) pair of uint32 per tile, in the order of the search
+    (gemm by gemm, ceil(M / MT0) * ceil(N / MT1) * batch tiles each). The table assumes
+    GSU 1, so kernels with another GSU at runtime search instead."""
+    return kernel["ProblemType"]["GroupedGemm"] and kernel["ProblemType"]["SupportUserArgs"] \
+      and len(gsuModule.items()) == 0 and self.groupedSurplusEarlyExit(kernel)
+
   def groupedSurplusExit(self, sgprTotalTiles, comment):
     """End the workgroup if WorkGroup0 is past sgprTotalTiles, the tiles of every gemm."""
     module = Module("groupedSurplusExit")
@@ -2965,6 +2981,53 @@ class KernelWriterAssembly(KernelWriter):
     module.add(SCBranchSCC1(labelName=keepLabel.getLabelName()))
     module.add(SEndpgm(comment=comment))
     module.add(keepLabel)
+    return module
+
+  def groupedTileTableLookup(self, kernel, sgprNumsOfGemm, tmpSgpr, sgprGemmIndex, labelFound) -> Module:
+    """Clear the tile table flag from gemm_count and, if it was set (see
+    groupedTileTableSupported), find the gemm of WorkGroup0 with one table load instead of
+    the search: workgroups past the table's tiles end, the others load their gemm's
+    (M, N, B, K) and go to labelFound with the state the search leaves there (gemm index + 1
+    in sgprGemmIndex, AccumTiles - NumWG0 = tiles of the gemm before this workgroup's)."""
+    module = Module("GroupedGemm tile table")
+    sgprEntry = tmpSgpr.idx
+    sgprBase  = tmpSgpr.idx + 2
+    sgprTotal = tmpSgpr.idx + 4
+    sgprScr   = tmpSgpr.idx + 5
+    sgprOff   = tmpSgpr.idx + 6
+    sgprAccum = tmpSgpr.idx + 7
+    labelSearch = Label(self.labels.getNameInc("GG_TileTableSkip"), "")
+    recordBytes = self.states.userArgsInfo.totalSize
+
+    module.addComment1("Grouped Gemm:: tile table lookup")
+    module.add(SAndB32(dst=sgpr(sgprScr), src0=sgpr(sgprNumsOfGemm), src1=hex(self.GROUPED_TILE_TABLE_FLAG), comment="tile table flag"))
+    module.add(SAndB32(dst=sgpr(sgprNumsOfGemm), src0=sgpr(sgprNumsOfGemm), src1=hex(self.GROUPED_GEMM_COUNT_MASK), comment="gemm count"))
+    module.add(SCmpEQU32(src0=sgpr(sgprScr), src1=0))
+    module.add(SCBranchSCC1(labelName=labelSearch.getLabelName(), comment="no table: search"))
+    self.cmpNamedArgTypeEq(module, 2, "ArgType == 2 ?")
+    module.add(SCBranchSCC0(labelName=labelSearch.getLabelName(), comment="the table follows device user args only"))
+    if kernel["GlobalSplitU"] != 0:
+      module.add(SAndB32(dst=sgpr(sgprScr), src0=sgpr("GSU"), src1=self.gsuMaskHex(kernel), comment="Restore GSU"))
+      module.add(SCmpEQU32(src0=sgpr(sgprScr), src1=1))
+      module.add(SCBranchSCC0(labelName=labelSearch.getLabelName(), comment="the table assumes GSU 1"))
+    module.add(SMulI32(dst=sgpr(sgprBase), src0=sgpr(sgprNumsOfGemm), src1=recordBytes, comment="bytes of the user args"))
+    module.add(SAddU32(dst=sgpr(sgprBase), src0=sgpr(sgprBase), src1=255))
+    module.add(SAndB32(dst=sgpr(sgprBase), src0=sgpr(sgprBase), src1=hex(0xFFFFFF00), comment="padded to 256 bytes"))
+    module.add(SAddU32(dst=sgpr(sgprBase), src0=sgpr("KernArgAddress"), src1=sgpr(sgprBase)))
+    module.add(SAddCU32(dst=sgpr(sgprBase + 1), src0=sgpr("KernArgAddress+1"), src1=0, comment="table address"))
+    module.add(SLShiftLeftB32(dst=sgpr(sgprOff), shiftHex=3, src=sgpr("WorkGroup0")))
+    module.add(SAddU32(dst=sgpr(sgprOff), src0=sgpr(sgprOff), src1=16, comment="entry of this tile"))
+    module.add(self.argLoader.loadKernArg(sgprTotal, sgprBase, 0, dword=1))
+    module.add(self.argLoader.loadKernArg(sgprEntry, sgprBase, sgpr(sgprOff), dword=2))
+    module.add(SWaitCnt(kmcnt=0, comment="tile table"))
+    module.add(self.groupedSurplusExit(sgprTotal, "past the last tile of every gemm: no work"))
+    module.add(SAddU32(dst=sgpr(sgprGemmIndex), src0=sgpr(sgprEntry), src1=1, comment="gemm index + 1"))
+    module.add(SSubU32(dst=sgpr(sgprAccum), src0=sgpr("WorkGroup0"), src1=sgpr(sgprEntry + 1), comment="AccumTiles"))
+    module.add(SMovB32(dst=sgpr(sgprTotal), src=0, comment="NumWG0"))
+    module.add(SMulI32(dst=sgpr(sgprOff), src0=sgpr(sgprEntry), src1=recordBytes, comment="offset of the gemm's user args"))
+    module.add(self.argLoader.loadKernArg(self.sgprs["SizesFree"], "KernArgAddress", sgpr(sgprOff), dword=4))
+    module.add(SBranch(labelName=labelFound.getLabelName(), comment="M, N, B, K arrive with the gemm's args"))
+    module.add(labelSearch)
     return module
 
   def defineAndResources(self, kernel, tPA, tPB, tPM):
@@ -3492,6 +3555,12 @@ class KernelWriterAssembly(KernelWriter):
         label_FOUND = Label("FOUND", "")
         gsuComponent = Component.GSU.find(self)
         gsuModule = gsuComponent.defineAndResources(self, kernel, tmpSgpr0, tmpSgprM, tmpSgprN, tmpSgprNumWG0, tmpSgprAccumTiles)
+        tileTable = self.groupedTileTableSupported(kernel, gsuModule)
+        if tileTable:
+          module.add(self.groupedTileTableLookup(kernel, sgprNumsOfGemm, tmpSgpr, tmpSgprLoopCounter, label_FOUND))
+        else:
+          module.add(SAndB32(dst=sgpr(sgprNumsOfGemm), src0=sgpr(sgprNumsOfGemm), src1=hex(self.GROUPED_GEMM_COUNT_MASK),
+                             comment="gemm count without the tile table flag"))
         if self.groupedGemmWaveSearchSupported(kernel, gsuModule):
           module.add(self.groupedGemmWaveSearch(kernel, sgprNumsOfGemm, tmpSgpr, tmpSgprM, tmpSgprLoopCounter, tmpSgprArgOffsett, label_FOUND))
         else:
@@ -3676,6 +3745,10 @@ class KernelWriterAssembly(KernelWriter):
           self.externalArgLoader.setOffset(offset)
           module.add(moduleExternalArgs)
           module.add(extLabelEnd)
+        if tileTable:
+          # The tile table path loads M, N, B, K with the gemm's args; the workgroup sizes
+          # below may be computed before the wait for the args.
+          module.add(SWaitCnt(kmcnt=0, comment="gemm sizes and args"))
 
       # Update label
       labels = []
