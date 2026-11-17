@@ -4824,7 +4824,8 @@ rocblaslt_status runKernelFromNewDeviceUserArguments(rocblaslt_handle       hand
                                                      rocblaslt::RocGemmType gemmType,
                                                      std::shared_ptr<void>  gemmData,
                                                      void*                  deviceUserArgs,
-                                                     hipStream_t            stream)
+                                                     hipStream_t            stream,
+                                                     uint32_t               gemmCountFlags)
 {
     rocblaslt_status status = rocblaslt_status_internal_error;
     try
@@ -4900,8 +4901,8 @@ rocblaslt_status runKernelFromNewDeviceUserArguments(rocblaslt_handle       hand
                     {
                         int gemmCount = 0;
                         memcpy(&gemmCount, arg, sizeof(int));
-                        gemmCount = gemmCount & 0x3FFFFFFF;
-                        gemmCount = gemmCount | (2 << 30);
+                        gemmCount = gemmCount & 0x1FFFFFFF;
+                        gemmCount = gemmCount | (2 << 30) | gemmCountFlags;
                         memcpy(arg, &gemmCount, sizeof(int));
                     }
                     memcpy(arg + TENSILE_COMMON_KERNEL_ARGS_SIZE, &deviceUserArgs, sizeof(void*));
@@ -6361,6 +6362,32 @@ int getMXScaleFormatFromAlgoIndex(rocblaslt_handle handle, const rocblaslt_matmu
 
     auto solution = library->getSolutionByIndex(*hardware, *solutionIndex);
     return solution ? solution->problemType.mxScaleFormat : -1;
+}
+
+bool getMacroTileFromAlgoIndex(rocblaslt_handle             handle,
+                               const rocblaslt_matmul_algo& algo,
+                               int&                         macroTile0,
+                               int&                         macroTile1)
+{
+    int* solutionIndex = (int*)algo.data;
+    if(*solutionIndex < 0)
+        return false;
+
+    std::shared_ptr<TensileLite::MasterSolutionLibrary<TensileLite::ContractionProblemGemm>>
+                                           library;
+    std::shared_ptr<hipDeviceProp_t>       deviceProp;
+    std::shared_ptr<TensileLite::Hardware> hardware;
+
+    auto adapter = get_library_and_adapter(&library, &deviceProp, &hardware, handle->device);
+    if(!library)
+        return false;
+
+    auto solution = library->getSolutionByIndex(*hardware, *solutionIndex);
+    if(!solution)
+        return false;
+    macroTile0 = solution->sizeMapping.macroTile.x;
+    macroTile1 = solution->sizeMapping.macroTile.y;
+    return macroTile0 > 0 && macroTile1 > 0;
 }
 
 /***************************************************************

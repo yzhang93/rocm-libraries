@@ -18,6 +18,7 @@
 #include <hip/hip_runtime.h>
 
 #include <algorithm>
+#include <cstdlib>
 #include <cstring>
 #include <memory>
 #include <type_traits>
@@ -149,6 +150,20 @@ namespace
         return (bytes + kRecordAlignment - 1) / kRecordAlignment * kRecordAlignment;
     }
 
+    // Tile table after the records (KernelWriterAssembly.groupedTileTableSupported): the total
+    // tile count at byte 0, then one (group, tile within the group) uint32 pair per tile from
+    // byte 16. With it the grouped kernels find their group with one load instead of a search.
+    constexpr uint32_t kTileTableFlag       = 1u << 29;
+    constexpr int      kTileTableThreads    = 1024;
+    constexpr int      kTileTableMaxGroups  = 4096;
+    constexpr int      kTileTableHeaderU32s = 4;
+
+    size_t tileTableBytes(uint32_t capacity)
+    {
+        size_t bytes = sizeof(uint32_t) * (kTileTableHeaderU32s + 2 * static_cast<size_t>(capacity));
+        return (bytes + kRecordAlignment - 1) / kRecordAlignment * kRecordAlignment;
+    }
+
     bool isGrouped(rocblaslt_matrix_layout l)
     {
         return l->batch_mode == HIPBLASLT_BATCH_MODE_GROUPED;
@@ -164,6 +179,16 @@ namespace
         int64_t cols  = 0;
         int64_t k     = 0;
         int64_t used  = 0;
+
+        // Tiles of the placeholder problems for one macro tile, the grid without GSU.
+        int64_t tiles(int64_t groups, int64_t mt0, int64_t mt1) const
+        {
+            auto t = [mt0, mt1](int64_t m, int64_t n) {
+                return (m + mt0 - 1) / mt0 * ((n + mt1 - 1) / mt1);
+            };
+            int64_t withCols = used == 0 ? groups : std::min(used, groups);
+            return t(rows0, cols0) + (withCols - 1) * t(rows, cols);
+        }
 
         bool operator==(const Placeholders& o) const
         {
@@ -372,6 +397,48 @@ namespace
                                 h.max_total_cols);
         p.k = placeholderK(desc, matA, h);
         return p;
+    }
+
+    struct TileTable
+    {
+        bool     use      = false;
+        uint32_t mt0      = 0;
+        uint32_t mt1      = 0;
+        uint32_t capacity = 0;
+        size_t   bytes    = 0;
+
+        bool operator==(const TileTable& o) const
+        {
+            return use == o.use && mt0 == o.mt0 && mt1 == o.mt1 && capacity == o.capacity;
+        }
+    };
+
+    // The tile table an algo would use with the bound placeholders: room for every tile of
+    // the grid. use stays false; the caller sets it if the workspace has room. The search
+    // covers 64 groups per chunk and a few chunks cost less than building the table, so it
+    // is used above kTileTableMinGroups groups. Prototype switch for A/B runs:
+    // HIPBLASLT_GROUPED_TILE_TABLE=0 never, 1 (default) above the minimum, 2 always.
+    TileTable tileTableFor(rocblaslt_handle             handle,
+                           const rocblaslt_matmul_algo& algo,
+                           const Placeholders&          bound,
+                           int                          groups)
+    {
+        constexpr int kTileTableMinGroups = 128;
+        TileTable     t;
+        const char*   env  = std::getenv("HIPBLASLT_GROUPED_TILE_TABLE");
+        const int     mode = env ? std::atoi(env) : 1;
+        int           mt0 = 0, mt1 = 0;
+        if(mode == 0 || (mode == 1 && groups <= kTileTableMinGroups) || groups > kTileTableMaxGroups
+           || !getMacroTileFromAlgoIndex(handle, algo, mt0, mt1))
+            return t;
+        const int64_t tiles = bound.tiles(groups, mt0, mt1);
+        if(tiles <= 0 || tiles > (int64_t{1} << 30))
+            return t;
+        t.mt0      = static_cast<uint32_t>(mt0);
+        t.mt1      = static_cast<uint32_t>(mt1);
+        t.capacity = static_cast<uint32_t>(tiles);
+        t.bytes    = tileTableBytes(t.capacity);
+        return t;
     }
 
     // Builds TensileDataGroupedGemm for the placeholder problems through the existing
@@ -586,14 +653,12 @@ namespace
         s2             = static_cast<uint32_t>(blocks * free);
     }
 
+    // Writes the record of group g; returns its D shape in m and n.
     template <typename Record>
-    __global__ void packGroupedRecords(Record templ, PackArgs args, Record* records)
+    __device__ void packRecord(
+        const Record& templ, const PackArgs& args, Record* records, int g, int64_t& m, int64_t& n)
     {
-        int g = blockIdx.x * blockDim.x + threadIdx.x;
-        if(g >= args.groupCount)
-            return;
-
-        int64_t aRows, aCols, ldA, bRows, bCols, ldB, cRows, cCols, ldC, m, n, ldD;
+        int64_t aRows, aCols, ldA, bRows, bCols, ldB, cRows, cCols, ldC, ldD;
         groupShape(args.a, g, aRows, aCols, ldA);
         groupShape(args.b, g, bRows, bCols, ldB);
         groupShape(args.c, g, cRows, cCols, ldC);
@@ -637,6 +702,126 @@ namespace
         records[g] = r;
     }
 
+    template <typename Record>
+    __global__ void packGroupedRecords(Record templ, PackArgs args, Record* records)
+    {
+        int g = blockIdx.x * blockDim.x + threadIdx.x;
+        if(g >= args.groupCount)
+            return;
+        int64_t m, n;
+        packRecord(templ, args, records, g, m, n);
+    }
+
+    struct TileTableArgs
+    {
+        uint32_t* table;
+        uint32_t  capacity;
+        uint32_t  mt0;
+        uint32_t  mt1;
+    };
+
+    // One workgroup: the records, then the tile table of up to kTileTableMaxGroups groups.
+    template <typename Record>
+    __global__ __launch_bounds__(kTileTableThreads) void
+        packGroupedRecordsTable(Record templ, PackArgs args, Record* records, TileTableArgs t)
+    {
+        constexpr int kPerThread = kTileTableMaxGroups / kTileTableThreads;
+        constexpr int kWaves     = kTileTableThreads / 64;
+        __shared__ uint32_t ends[kTileTableMaxGroups];
+        __shared__ uint32_t waveEnds[kWaves];
+
+        const int tid    = threadIdx.x;
+        const int lane   = tid % 64;
+        const int wave   = tid / 64;
+        const int groups = args.groupCount;
+
+        // Records one group per thread (strided, so up to kTileTableThreads groups pack in
+        // parallel), each group's tile count in ends.
+        for(int g = tid; g < groups; g += kTileTableThreads)
+        {
+            int64_t m, n;
+            packRecord(templ, args, records, g, m, n);
+            ends[g] = static_cast<uint32_t>((m + t.mt0 - 1) / t.mt0 * ((n + t.mt1 - 1) / t.mt1));
+        }
+        __syncthreads();
+
+        // For the scan each thread owns kPerThread consecutive groups; local[i] is their
+        // inclusive sum.
+        uint32_t local[kPerThread];
+        uint32_t sum = 0;
+        for(int i = 0; i < kPerThread; i++)
+        {
+            const int g = tid * kPerThread + i;
+            if(g < groups)
+                sum += ends[g];
+            local[i] = sum;
+        }
+
+        uint32_t incl = sum;
+        for(int d = 1; d < 64; d <<= 1)
+        {
+            uint32_t v = __shfl_up(incl, d, 64);
+            if(lane >= d)
+                incl += v;
+        }
+        if(lane == 63)
+            waveEnds[wave] = incl;
+        __syncthreads();
+        if(wave == 0)
+        {
+            uint32_t w = lane < kWaves ? waveEnds[lane] : 0;
+            for(int d = 1; d < kWaves; d <<= 1)
+            {
+                uint32_t v = __shfl_up(w, d, 64);
+                if(lane >= d)
+                    w += v;
+            }
+            if(lane < kWaves)
+                waveEnds[lane] = w;
+        }
+        __syncthreads();
+        const uint32_t before = (wave ? waveEnds[wave - 1] : 0) + incl - sum;
+        for(int i = 0; i < kPerThread; i++)
+        {
+            const int g = tid * kPerThread + i;
+            if(g < groups)
+                ends[g] = before + local[i];
+        }
+        __syncthreads();
+
+        const uint32_t total = ends[groups - 1] < t.capacity ? ends[groups - 1] : t.capacity;
+        if(tid == 0)
+            t.table[0] = total;
+        // Each thread fills a contiguous range of tiles: one search for the group of its
+        // first tile, then forward through the groups.
+        const uint32_t perThread = (total + kTileTableThreads - 1) / kTileTableThreads;
+        const uint32_t first     = tid * perThread;
+        const uint32_t last      = first + perThread < total ? first + perThread : total;
+        if(first >= last)
+            return;
+        int lo = 0, hi = groups - 1;
+        while(lo < hi)
+        {
+            const int mid = (lo + hi) / 2;
+            if(ends[mid] > first)
+                hi = mid;
+            else
+                lo = mid + 1;
+        }
+        uint2*   entries = reinterpret_cast<uint2*>(t.table + kTileTableHeaderU32s);
+        uint32_t start   = lo ? ends[lo - 1] : 0;
+        uint32_t end     = ends[lo];
+        for(uint32_t tile = first; tile < last; tile++)
+        {
+            while(tile >= end)
+            {
+                start = end;
+                end   = ends[++lo];
+            }
+            entries[tile] = make_uint2(static_cast<uint32_t>(lo), tile - start);
+        }
+    }
+
     // MX record with the fields from alpha on taken from the standard record.
     GroupedRecordMX mxTemplate(const GroupedRecord& t)
     {
@@ -674,6 +859,7 @@ namespace
         rocblaslt_compute_type computeType;
         bool                   mx = false;
         Placeholders           placeholders;
+        TileTable              table;
 
         std::shared_ptr<void> gemmData;
         GroupedRecord         templ;
@@ -780,10 +966,13 @@ rocblaslt_status
                    != rocblaslt_status_success
                || ws > tensileMax || !algoSupports(handle, smallestData, candidate.algo))
                 continue;
+            const TileTable table = tileTableFor(handle, candidate.algo, bound, groups);
+            const bool      withTable
+                = table.bytes > 0 && ws + recBytes + table.bytes <= pref->max_workspace_bytes;
             auto& out                     = heuristicResultsArray[*returnAlgoCount];
             out                           = candidate;
             out.algo.max_workspace_bytes  = pref->max_workspace_bytes;
-            out.workspaceSize             = ws + recBytes;
+            out.workspaceSize             = ws + recBytes + (withTable ? table.bytes : 0);
             out.state                     = rocblaslt_status_success;
             (*returnAlgoCount)++;
         }
@@ -860,6 +1049,7 @@ rocblaslt_status rocblaslt_grouped_matmul(rocblaslt_handle             handle,
             return status;
 
         const int32_t algoIndex = *reinterpret_cast<const int32_t*>(algo->data);
+        TileTable     table     = tileTableFor(handle, *algo, bound, groups);
         auto launch = std::static_pointer_cast<GroupedLaunch>(desc->grouped_launch);
         bool reuse  = launch && launch->algoIndex == algoIndex && launch->workspace == workspace
                      && launch->workspaceSize == workspaceSizeInBytes && launch->stream == stream
@@ -867,7 +1057,9 @@ rocblaslt_status rocblaslt_grouped_matmul(rocblaslt_handle             handle,
                      && launch->opB == desc->op_B && launch->typeA == matA->type
                      && launch->typeB == matB->type && launch->typeC == matC->type
                      && launch->typeD == matD->type && launch->computeType == desc->compute_type
-                     && launch->mx == mx && launch->placeholders == bound;
+                     && launch->mx == mx && launch->placeholders == bound
+                     && launch->table.capacity == table.capacity && launch->table.mt0 == table.mt0
+                     && launch->table.mt1 == table.mt1;
         if(!reuse)
         {
             launch = std::make_shared<GroupedLaunch>();
@@ -877,10 +1069,8 @@ rocblaslt_status rocblaslt_grouped_matmul(rocblaslt_handle             handle,
             if(status != rocblaslt_status_success)
                 return status;
 
-            void*  tensileWs     = static_cast<uint8_t*>(workspace) + recBytes;
-            size_t tensileWsSize = workspaceSizeInBytes - recBytes;
-            auto   rocAlgo       = *algo;
-            size_t required      = 0;
+            auto   rocAlgo  = *algo;
+            size_t required = 0;
             status = rocblaslt_is_algo_supported_cpp(handle,
                                                      rocblaslt::RocGemmType::ROCBLASLT_GROUPED_GEMM,
                                                      launch->gemmData,
@@ -889,11 +1079,16 @@ rocblaslt_status rocblaslt_grouped_matmul(rocblaslt_handle             handle,
                                                      required);
             if(status != rocblaslt_status_success)
                 return status;
-            if(required > tensileWsSize)
+            if(required + recBytes > workspaceSizeInBytes)
             {
                 log_error(__func__, "workspace too small", required + recBytes);
                 return rocblaslt_status_invalid_value;
             }
+            table.use = table.bytes > 0
+                        && required + recBytes + table.bytes <= workspaceSizeInBytes;
+            const size_t headBytes     = recBytes + (table.use ? table.bytes : 0);
+            void*        tensileWs     = static_cast<uint8_t*>(workspace) + headBytes;
+            size_t       tensileWsSize = workspaceSizeInBytes - headBytes;
             std::shared_ptr<void> smallestData;
             status = buildSmallestData(
                 handle, desc, matA, matB, matC, matD, desc->grouped_hints, smallestData);
@@ -940,6 +1135,7 @@ rocblaslt_status rocblaslt_grouped_matmul(rocblaslt_handle             handle,
             launch->computeType   = desc->compute_type;
             launch->mx            = mx;
             launch->placeholders  = bound;
+            launch->table         = table;
             desc->grouped_launch  = launch;
         }
 
@@ -980,7 +1176,32 @@ rocblaslt_status rocblaslt_grouped_matmul(rocblaslt_handle             handle,
 
         unsigned block = 256;
         unsigned grid  = (static_cast<unsigned>(groups) + block - 1) / block;
-        if(mx)
+        const TileTable& tt = launch->table;
+        TileTableArgs    targs{reinterpret_cast<uint32_t*>(static_cast<uint8_t*>(workspace) + recBytes),
+                            tt.capacity,
+                            tt.mt0,
+                            tt.mt1};
+        if(tt.use && mx)
+            hipLaunchKernelGGL(packGroupedRecordsTable<GroupedRecordMX>,
+                               dim3(1),
+                               dim3(kTileTableThreads),
+                               0,
+                               stream,
+                               mxTemplate(launch->templ),
+                               args,
+                               static_cast<GroupedRecordMX*>(workspace),
+                               targs);
+        else if(tt.use)
+            hipLaunchKernelGGL(packGroupedRecordsTable<GroupedRecord>,
+                               dim3(1),
+                               dim3(kTileTableThreads),
+                               0,
+                               stream,
+                               launch->templ,
+                               args,
+                               static_cast<GroupedRecord*>(workspace),
+                               targs);
+        else if(mx)
             hipLaunchKernelGGL(packGroupedRecords<GroupedRecordMX>,
                                dim3(grid),
                                dim3(block),
@@ -1004,9 +1225,13 @@ rocblaslt_status rocblaslt_grouped_matmul(rocblaslt_handle             handle,
             return rocblaslt_status_internal_error;
         }
 
-        log_api(__func__, "groupCount", groups, "algoIndex", algoIndex, "reuse", reuse);
-        return rocblaslt_run_user_args_cpp(
-            handle, rocblaslt::RocGemmType::ROCBLASLT_GROUPED_GEMM, launch->gemmData, workspace, stream);
+        log_api(__func__, "groupCount", groups, "algoIndex", algoIndex, "reuse", reuse, "tileTable", tt.use);
+        return runKernelFromNewDeviceUserArguments(handle,
+                                                   rocblaslt::RocGemmType::ROCBLASLT_GROUPED_GEMM,
+                                                   launch->gemmData,
+                                                   workspace,
+                                                   stream,
+                                                   tt.use ? kTileTableFlag : 0);
     }
     catch(const rocblaslt_status& status)
     {

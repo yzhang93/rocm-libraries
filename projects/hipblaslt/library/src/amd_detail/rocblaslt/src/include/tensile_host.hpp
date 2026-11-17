@@ -110,11 +110,14 @@ rocblaslt_status getDeviceUserArgumentsValuesFromContractionProblem(rocblaslt_ha
                                                                     std::shared_ptr<void>  gemmData,
                                                                     void* hostDeviceUserArgs);
 
+// gemmCountFlags are ORed into the grouped kernels' gemm_count argument, below the ArgType
+// bits (see KernelWriterAssembly.GROUPED_TILE_TABLE_FLAG).
 rocblaslt_status runKernelFromNewDeviceUserArguments(rocblaslt_handle       handle,
                                                      rocblaslt::RocGemmType gemmType,
                                                      std::shared_ptr<void>  gemmData,
                                                      void*                  deviceUserArgs,
-                                                     hipStream_t            stream);
+                                                     hipStream_t            stream,
+                                                     uint32_t               gemmCountFlags = 0);
 
 rocblaslt_status runKernelFromDeviceUserArguments(rocblaslt_handle             handle,
                                                   rocblaslt::RocGemmType       gemmType,
@@ -141,6 +144,12 @@ std::string getSolutionNameFromAlgoIndex(rocblaslt_handle             handle,
 // In-device MX scale layout the algo's kernel expects (0 = canonical, 1 = gfx950 host
 // pre-swizzled, 2 = in-memory swizzled), or -1 if the algo is not a Tensile solution.
 int getMXScaleFormatFromAlgoIndex(rocblaslt_handle handle, const rocblaslt_matmul_algo& algo);
+
+// MacroTile0 and MacroTile1 of the algo's kernel; false if the algo is not a Tensile solution.
+bool getMacroTileFromAlgoIndex(rocblaslt_handle             handle,
+                               const rocblaslt_matmul_algo& algo,
+                               int&                         macroTile0,
+                               int&                         macroTile1);
 
 /***********************************************************************************
  * Whether Tensile has been initialized for at least one device (used for
